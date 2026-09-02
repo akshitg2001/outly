@@ -13,8 +13,20 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
+  metadataBase: new URL('https://outly-planner.akshitg2001.chatgpt.site'),
   title: 'Outly — AI outing planner',
   description: 'Personalised, bookable local outing plans in seconds.',
+  openGraph: {
+    title: 'Outly — AI outing planner',
+    description: 'Plan less. Go out better. Bookable local outings, made for you.',
+    images: [{ url: '/og.png', width: 1680, height: 945, alt: 'Outly — Plan less. Go out better.' }],
+  },
+  twitter: {
+    card: 'summary_large_image',
+    title: 'Outly — AI outing planner',
+    description: 'Plan less. Go out better. Bookable local outings, made for you.',
+    images: ['/og.png'],
+  },
 };
 
 export default function RootLayout({
