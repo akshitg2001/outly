@@ -42,6 +42,6 @@ export async function verifyAdminSession(request: Request) {
   return (await hmac(expiresValue, secret)) === signature;
 }
 
-export function adminCookie(value: string) {
-  return `outly_admin=${value}; Path=/; HttpOnly; SameSite=Strict; Secure; Max-Age=${8 * 60 * 60}`;
+export function adminCookie(value: string, secure = true) {
+  return `outly_admin=${value}; Path=/; HttpOnly; SameSite=Strict; ${secure ? 'Secure; ' : ''}Max-Age=${8 * 60 * 60}`;
 }

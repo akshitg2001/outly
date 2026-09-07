@@ -184,7 +184,7 @@ function buildPlan(pair: CandidatePair, agreement: GroupAgreement, rank: number,
     title: `${pair.activity.name} + ${pair.dining.name}`,
     summary: `${label === 'Easiest commute' ? 'The most travel-friendly option' : label === 'Best value' ? 'The strongest known-cost option' : 'The best balance of preferences and travel'}, built around ${pair.activity.area}.`,
     score,
-    fitCount: pair.travel.filter((travel) => travel.minutes <= ((agreement.participantCount ? 999 : 0))).length || agreement.participantCount,
+    fitCount: agreement.participantCount,
     participantCount: agreement.participantCount,
     area: pair.activity.area,
     date: agreement.selectedDate ?? '',
@@ -231,8 +231,6 @@ export function selectPlans(pairs: CandidatePair[], participants: ParticipantRec
 
   const base = viable.map((pair) => buildPlan(pair, agreement, 0, 'Best overall fit'));
   const bestOverall = [...base].sort((a, b) => b.score - a.score)[0];
-  const easiest = [...base].sort((a, b) => Math.max(...a.travel.map((item) => item.minutes)) - Math.max(...b.travel.map((item) => item.minutes)))[0];
-  const bestValue = [...base].sort((a, b) => a.knownCost - b.knownCost)[0];
   const selections: OutingPlan[] = [];
 
   const add = (plan: OutingPlan | undefined, label: OutingPlan['label']) => {
@@ -240,7 +238,13 @@ export function selectPlans(pairs: CandidatePair[], participants: ParticipantRec
     selections.push({ ...plan, id: crypto.randomUUID(), rank: selections.length + 1, label });
   };
   add(bestOverall, 'Best overall fit');
+  const easiest = [...base]
+    .filter((plan) => !selections.some((item) => item.title === plan.title))
+    .sort((a, b) => Math.max(...a.travel.map((item) => item.minutes)) - Math.max(...b.travel.map((item) => item.minutes)))[0];
   add(easiest, 'Easiest commute');
+  const bestValue = [...base]
+    .filter((plan) => !selections.some((item) => item.title === plan.title))
+    .sort((a, b) => a.knownCost - b.knownCost)[0];
   add(bestValue, 'Best value');
 
   for (const plan of [...base].sort((a, b) => b.score - a.score)) {

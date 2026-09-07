@@ -141,3 +141,5 @@ CREATE TABLE `votes` (
 --> statement-breakpoint
 CREATE UNIQUE INDEX `idx_votes_group_voter` ON `votes` (`group_id`,`voter_key_hash`);--> statement-breakpoint
 CREATE INDEX `idx_votes_plan_id` ON `votes` (`plan_id`);
+--> statement-breakpoint
+PRAGMA optimize;

@@ -192,6 +192,7 @@ export type PublicGroupView = {
   role: 'participant' | 'organizer';
   group: GroupRecord;
   participantNames: string[];
+  participantSummaries: Array<{ id: string; displayName: string }>;
   submittedCount: number;
   expectedSize: number;
   agreement: GroupAgreement | null;
