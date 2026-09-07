@@ -59,6 +59,8 @@ export type ParticipantPreferenceInput = {
 };
 
 export type ParticipantRecord = ParticipantPreferenceInput & {
+  timeExtensionMinutes?: number;
+  durationMaxOverride?: number | null;
   id: string;
   groupId: string;
   originLat: number | null;
@@ -93,6 +95,7 @@ export type ConflictSuggestion = {
 };
 
 export type GroupAgreement = {
+  commonTimeRanges?: Array<{ start: number; end: number }>;
   participantCount: number;
   selectedDate: string | null;
   commonDates: string[];
@@ -168,6 +171,8 @@ export type PlanStop = {
 };
 
 export type OutingPlan = {
+  hasUnknownDiningCost?: boolean;
+  hoursVerificationRequired?: boolean;
   id: string;
   rank: number;
   label: 'Best overall fit' | 'Easiest commute' | 'Best value';

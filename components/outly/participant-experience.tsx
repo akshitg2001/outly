@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowRight, Bus, Car, Check, CheckCircle2, IndianRupee, Lock, ShieldCheck, Users } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -8,7 +8,8 @@ import { Input } from '@/components/ui/input';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Slider } from '@/components/ui/slider';
 import { ACTIVITY_LABELS, DURATION_BANDS, TIME_WINDOW_LABELS, type ActivityCategory, type DurationBand, type FoodPreference, type TimeWindow, type TravelMode } from '@/lib/outly-types';
-import { formatDate } from '@/lib/recommendation';
+import { formatDate, roundBudgetHardMax } from '@/lib/recommendation';
+import type { ParticipantRecord } from '@/lib/outly-types';
 import { LocationCombobox } from './location-combobox';
 import { ErrorPanel, LoadingPanel, SiteHeader } from './site-header';
 import { ResultsBoard } from './results-board';
@@ -39,23 +40,29 @@ export function ParticipantExperience({ token }: { token: string }) {
   const [participantId, setParticipantId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [formError, setFormError] = useState('');
+  const initializedGroup = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!view || dates.length) return;
+    if (!view || initializedGroup.current === view.group.id) return;
+    initializedGroup.current = view.group.id;
     setDates(view.group.candidateDates);
     const storedId = window.localStorage.getItem(`outly_participant_id_${view.group.id}`);
     const storedToken = window.localStorage.getItem(`outly_edit_token_${view.group.id}`);
     if (storedId && storedToken) { setParticipantId(storedId); setSubmitted(true); setEditing(false); }
-  }, [dates.length, view]);
+  }, [view]);
 
-  const complete = useMemo(() => displayName.trim().length >= 2 && origin.label.trim().length >= 3 && dates.length > 0 && timeWindows.length > 0 && activities.length > 0, [activities, dates, displayName, origin.label, timeWindows]);
+  const complete = useMemo(() => displayName.trim().length >= 2 && Boolean(origin.placeId) && dates.length > 0 && timeWindows.length > 0 && activities.length > 0, [activities, dates, displayName, origin.placeId, timeWindows]);
   const toggle = <T,>(current: T[], value: T, set: (next: T[]) => void) => set(current.includes(value) ? current.filter((item) => item !== value) : [...current, value]);
 
   async function submit() {
     if (!view) return;
     setBusy(true); setFormError('');
     try {
-      const editToken = window.localStorage.getItem(`outly_edit_token_${view.group.id}`);
+      let editToken = window.localStorage.getItem(`outly_edit_token_${view.group.id}`);
+      if (!editToken) {
+        editToken = Array.from(crypto.getRandomValues(new Uint8Array(24)), (byte) => byte.toString(16).padStart(2, '0')).join('');
+        window.localStorage.setItem(`outly_edit_token_${view.group.id}`, editToken);
+      }
       const requirements = [...dietary, ...(otherDietary.trim() ? [otherDietary.trim()] : [])];
       const response = await fetch(`/api/groups/${encodeURIComponent(token)}/participants`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ displayName, originLabel: origin.label, originPlaceId: origin.placeId, travelMode, travelMaxMinutes: travelMax, budgetTarget: budget, acceptableDates: dates, timeWindows, activities, foodPreference: food, dietary: requirements, durationBand: duration, editToken }),
@@ -83,6 +90,26 @@ export function ParticipantExperience({ token }: { token: string }) {
     finally { setBusy(false); }
   }
 
+  async function editSaved() {
+    if (!view) return;
+    setBusy(true); setFormError('');
+    try {
+      const privateKey = window.localStorage.getItem(`outly_edit_token_${view.group.id}`) ?? '';
+      const response = await fetch(`/api/groups/${encodeURIComponent(token)}/participants`, { method: 'POST', headers: { 'X-Outly-Edit-Token': privateKey } });
+      const payload = await response.json() as { participant?: ParticipantRecord; error?: string };
+      if (!response.ok || !payload.participant) throw new Error(payload.error ?? 'Could not load your saved response.');
+      const saved = payload.participant;
+      setDisplayName(saved.displayName); setOrigin({ label: saved.originLabel, placeId: saved.originPlaceId ?? null });
+      setTravelMode(saved.travelMode); setTravelMax(saved.travelMaxMinutes); setBudget(saved.budgetTarget);
+      setDates(saved.acceptableDates); setTimeWindows(saved.timeWindows); setActivities(saved.activities);
+      setFood(saved.foodPreference); setDuration(saved.durationBand);
+      setDietary(saved.dietary.filter((item) => ['vegetarian', 'pure_veg', 'no_alcohol'].includes(item)));
+      setOtherDietary(saved.dietary.filter((item) => !['vegetarian', 'pure_veg', 'no_alcohol'].includes(item)).join(', '));
+      setEditing(true);
+    } catch (reason) { setFormError(reason instanceof Error ? reason.message : 'Could not load your response.'); }
+    finally { setBusy(false); }
+  }
+
   if (loading) return <main className="min-h-screen"><SiteHeader /><LoadingPanel /></main>;
   if (error || !view) return <main className="min-h-screen"><SiteHeader /><ErrorPanel message={error || 'This private plan link is unavailable.'} retry={() => refresh()} /></main>;
   if (view.group.status === 'planned') return <ResultsBoard token={token} initialView={view} />;
@@ -105,14 +132,14 @@ export function ParticipantExperience({ token }: { token: string }) {
           <section>
             {affected && <div className="mb-6 border-2 border-signal bg-[#f9ded6] p-5"><p className="eyebrow">Your answer can unlock the plan</p><h2 className="mt-2 font-heading text-2xl font-semibold">A small change was proposed</h2><p className="mt-2 text-sm leading-6">{view.pendingRelaxation?.description}</p><Button onClick={approve} disabled={busy} className="mt-4 rounded-none bg-signal text-white hover:bg-[#c93c25]">{busy ? 'Saving…' : 'Accept this change'} <ArrowRight /></Button></div>}
             {submitted && !editing ? (
-              <div className="border-2 border-foreground bg-card p-6 sm:p-9"><CheckCircle2 className="size-10 text-[#27734d]" /><p className="eyebrow mt-6">Response saved</p><h2 className="mt-2 font-heading text-4xl font-semibold tracking-[-0.04em]">You’re in the mix.</h2><p className="mt-3 max-w-lg leading-7 text-muted-foreground">Outly will combine your limits with everyone else’s. This page updates automatically when the organizer locks the agreement or publishes plans.</p><div className="mt-7 border-y border-border py-4"><p className="text-sm font-semibold">{view.submittedCount} of {view.expectedSize} people have responded</p><p className="mt-1 text-sm text-muted-foreground">You can still edit until the organizer locks the group.</p></div>{view.group.status === 'collecting' ? <button onClick={() => setEditing(true)} className="mt-6 border border-foreground px-5 py-3 text-sm font-semibold hover:bg-foreground hover:text-background">Edit my preferences</button> : <div className="mt-6 flex items-center gap-2 text-sm font-semibold"><Lock className="size-4" />Agreement locked — plans are being prepared</div>}{formError && <p className="mt-4 text-sm text-destructive">{formError}</p>}</div>
+              <div className="border-2 border-foreground bg-card p-6 sm:p-9"><CheckCircle2 className="size-10 text-[#27734d]" /><p className="eyebrow mt-6">Response saved</p><h2 className="mt-2 font-heading text-4xl font-semibold tracking-[-0.04em]">You’re in the mix.</h2><p className="mt-3 max-w-lg leading-7 text-muted-foreground">Outly will combine your limits with everyone else’s. This page updates automatically when the organizer locks the agreement or publishes plans.</p><div className="mt-7 border-y border-border py-4"><p className="text-sm font-semibold">{view.submittedCount} of {view.expectedSize} people have responded</p><p className="mt-1 text-sm text-muted-foreground">You can still edit until the organizer locks the group.</p></div>{view.group.status === 'collecting' ? <button onClick={editSaved} disabled={busy} className="mt-6 border border-foreground px-5 py-3 text-sm font-semibold hover:bg-foreground hover:text-background">Edit my preferences</button> : <div className="mt-6 flex items-center gap-2 text-sm font-semibold"><Lock className="size-4" />Agreement locked — plans are being prepared</div>}{formError && <p className="mt-4 text-sm text-destructive">{formError}</p>}</div>
             ) : (
               <form onSubmit={(event) => { event.preventDefault(); void submit(); }}>
                 <p className="eyebrow">Your preferences</p><h2 className="mt-2 font-heading text-4xl font-semibold tracking-[-0.04em]">What works for you?</h2><p className="mt-3 text-muted-foreground">There are no wrong answers. The organizer sees the overlap, not your private details.</p>
                 <FormSection number="01" title="You and your starting point"><label className="field-label">Name or nickname<Input value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder="What should the group see?" className="editorial-input mt-2" /></label><label className="field-label mt-5">Starting location<LocationCombobox value={origin.label} placeId={origin.placeId} onChange={setOrigin} /></label><fieldset className="mt-5"><legend className="field-label">How will you travel?</legend><RadioGroup value={travelMode} onValueChange={(value) => setTravelMode(value as TravelMode)} className="mt-2 grid grid-cols-2 gap-2"><RadioChoice value="drive" label="Cab / drive" icon={<Car className="size-4" />} /><RadioChoice value="transit" label="Public transport" icon={<Bus className="size-4" />} /></RadioGroup></fieldset><label className="field-label mt-5">Maximum one-way travel: <strong>{travelMax} min</strong><Slider min={15} max={90} step={5} value={[travelMax]} onValueChange={(value) => setTravelMax(typeof value === 'number' ? value : value[0])} className="mt-4" /></label></FormSection>
-                <FormSection number="02" title="Time and spend"><fieldset><legend className="field-label">Dates you can make</legend><div className="mt-2 grid gap-2 sm:grid-cols-2">{view.group.candidateDates.map((date) => <CheckChoice key={date} checked={dates.includes(date)} label={formatDate(date)} onChange={() => toggle(dates, date, setDates)} />)}</div></fieldset><fieldset className="mt-5"><legend className="field-label">Time windows</legend><div className="mt-2 grid gap-2 sm:grid-cols-2">{windows.map((window) => <CheckChoice key={window} checked={timeWindows.includes(window)} label={TIME_WINDOW_LABELS[window]} onChange={() => toggle(timeWindows, window, setTimeWindows)} />)}</div></fieldset><label className="field-label mt-6">Maximum spend per person<div className="relative mt-2"><IndianRupee className="absolute left-3 top-3.5 size-4 text-muted-foreground" /><Input type="number" min={300} max={20000} step={100} value={budget} onChange={(event) => setBudget(Number(event.target.value))} className="editorial-input pl-10" /></div><span className="mt-2 block text-xs font-normal text-muted-foreground">Outly targets ₹{budget.toLocaleString('en-IN')} and never exceeds ₹{Math.ceil(budget * 1.15 / 100) * 100} in known costs.</span></label></FormSection>
-                <FormSection number="03" title="The kind of plan"><fieldset><legend className="field-label">Activities that sound good</legend><div className="mt-2 grid gap-2 sm:grid-cols-2">{categories.map((category) => <CheckChoice key={category} checked={activities.includes(category)} label={ACTIVITY_LABELS[category]} onChange={() => toggle(activities, category, setActivities)} />)}</div></fieldset><fieldset className="mt-6"><legend className="field-label">Food</legend><RadioGroup value={food} onValueChange={(value) => setFood(value as FoodPreference)} className="mt-2 grid grid-cols-2 gap-2"><RadioChoice value="meal" label="Proper meal" /><RadioChoice value="snacks" label="Snacks & drinks" /></RadioGroup></fieldset><fieldset className="mt-6"><legend className="field-label">Total duration</legend><RadioGroup value={duration} onValueChange={(value) => setDuration(value as DurationBand)} className="mt-2 grid grid-cols-2 gap-2">{durations.map((item) => <RadioChoice key={item.id} value={item.id} label={item.label} note={item.note} />)}</RadioGroup></fieldset></FormSection>
-                <FormSection number="04" title="Dietary needs"><div className="grid gap-2 sm:grid-cols-2">{[['vegetarian', 'Vegetarian options'], ['pure_veg', 'Pure veg venue'], ['no_alcohol', 'No-alcohol venue']].map(([value, label]) => <CheckChoice key={value} checked={dietary.includes(value)} label={label} onChange={() => toggle(dietary, value, setDietary)} />)}</div><label className="field-label mt-5">Allergy or other requirement <span className="font-normal text-muted-foreground">(optional)</span><Input value={otherDietary} onChange={(event) => setOtherDietary(event.target.value)} placeholder="e.g. severe nut allergy" className="editorial-input mt-2" /><span className="mt-2 block text-xs font-normal text-muted-foreground">Venue-level dietary details are marked for confirmation when the source cannot verify them.</span></label></FormSection>
+                <FormSection number="02" title="Time and spend"><fieldset><legend className="field-label">Dates you can make</legend><div className="mt-2 grid gap-2 sm:grid-cols-2">{view.group.candidateDates.map((date) => <CheckChoice key={date} checked={dates.includes(date)} label={formatDate(date)} onChange={() => toggle(dates, date, setDates)} />)}</div></fieldset><fieldset className="mt-5"><legend className="field-label">Time windows</legend><div className="mt-2 grid gap-2 sm:grid-cols-2">{windows.map((window) => <CheckChoice key={window} checked={timeWindows.includes(window)} label={TIME_WINDOW_LABELS[window]} onChange={() => toggle(timeWindows, window, setTimeWindows)} />)}</div></fieldset><label className="field-label mt-6">Maximum spend per person<div className="relative mt-2"><IndianRupee className="absolute left-3 top-3.5 size-4 text-muted-foreground" /><Input type="number" min={300} max={20000} step={100} value={budget} onChange={(event) => setBudget(Number(event.target.value))} className="editorial-input pl-10" /></div><span className="mt-2 block text-xs font-normal text-muted-foreground">Outly targets ₹{budget.toLocaleString('en-IN')} and never exceeds ₹{roundBudgetHardMax(budget)} in known costs.</span></label></FormSection>
+                <FormSection number="03" title="The kind of plan"><fieldset><legend className="field-label">Activities that sound good</legend><div className="mt-2 grid gap-2 sm:grid-cols-2">{categories.map((category) => <CheckChoice key={category} checked={activities.includes(category)} label={ACTIVITY_LABELS[category]} onChange={() => category === 'anything' ? setActivities(['anything']) : toggle(activities.filter((item) => item !== 'anything'), category, setActivities)} />)}</div></fieldset><fieldset className="mt-6"><legend className="field-label">Food</legend><RadioGroup value={food} onValueChange={(value) => setFood(value as FoodPreference)} className="mt-2 grid grid-cols-2 gap-2"><RadioChoice value="meal" label="Proper meal" /><RadioChoice value="snacks" label="Snacks & drinks" /></RadioGroup></fieldset><fieldset className="mt-6"><legend className="field-label">Total duration</legend><RadioGroup value={duration} onValueChange={(value) => setDuration(value as DurationBand)} className="mt-2 grid grid-cols-2 gap-2">{durations.map((item) => <RadioChoice key={item.id} value={item.id} label={item.label} note={item.note} />)}</RadioGroup></fieldset></FormSection>
+                <FormSection number="04" title="Dietary needs"><div className="grid gap-2 sm:grid-cols-2">{[['vegetarian', 'Vegetarian options'], ['pure_veg', 'Pure veg venue'], ['no_alcohol', 'No-alcohol venue']].map(([value, label]) => <CheckChoice key={value} checked={dietary.includes(value)} label={label} onChange={() => toggle(dietary, value, setDietary)} />)}</div><label className="field-label mt-5">Allergy or other requirement <span className="font-normal text-muted-foreground">(optional)</span><Input value={otherDietary} onChange={(event) => setOtherDietary(event.target.value)} placeholder="e.g. severe nut allergy" className="editorial-input mt-2" /><span className="mt-2 block text-xs font-normal text-muted-foreground">Dining must have recorded confirmation of every requirement. Strict requirements may leave no matching options.</span></label></FormSection>
                 {formError && <p role="alert" className="mb-5 border-l-4 border-destructive bg-[#fbe9e7] px-4 py-3 text-sm text-destructive">{formError}</p>}<Button type="submit" disabled={!complete || busy} className="h-13 w-full rounded-none bg-signal text-base font-semibold text-white hover:bg-[#c93c25]">{busy ? 'Saving your response…' : submitted ? 'Update my preferences' : 'Add me to the plan'} {!busy && <ArrowRight />}</Button>
               </form>
             )}

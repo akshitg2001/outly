@@ -31,13 +31,34 @@ function participantIdsMissing<T>(participants: ParticipantRecord[], key: keyof 
   return participants.filter((participant) => !(participant[key] as T[]).includes(value)).map((participant) => participant.id);
 }
 
+type TimeRange = { start: number; end: number };
+
+function mergeRanges(ranges: TimeRange[]): TimeRange[] {
+  const merged: TimeRange[] = [];
+  for (const range of [...ranges].sort((a, b) => a.start - b.start)) {
+    const last = merged.at(-1);
+    if (last && range.start <= last.end) last.end = Math.max(last.end, range.end);
+    else merged.push({ ...range });
+  }
+  return merged;
+}
+
+export function sharedTimeRanges(participants: ParticipantRecord[]): TimeRange[] {
+  return participants.reduce<TimeRange[]>((shared, person) => {
+    const extension = person.timeExtensionMinutes ?? 0;
+    const ranges = mergeRanges(person.timeWindows.map((window) => ({ start: Math.max(0, TIME_WINDOWS[window].start - extension), end: Math.min(1440, TIME_WINDOWS[window].end + extension) })));
+    return mergeRanges(shared.flatMap((a) => ranges.map((b) => ({ start: Math.max(a.start, b.start), end: Math.min(a.end, b.end) })).filter((range) => range.end > range.start)));
+  }, [{ start: 0, end: 1440 }]);
+}
+
 export function aggregatePreferences(participants: ParticipantRecord[], candidateDates: string[]): GroupAgreement {
   const commonDates = intersection(participants.map((participant) => participant.acceptableDates)).filter((date) => candidateDates.includes(date));
   const commonTimeWindows = intersection(participants.map((participant) => participant.timeWindows));
+  const commonTimeRanges = participants.length ? sharedTimeRanges(participants) : [];
   const budgetTarget = participants.length ? Math.min(...participants.map((participant) => participant.budgetTarget)) : 0;
-  const budgetHardMax = participants.length ? Math.min(...participants.map((participant) => participant.budgetHardMax)) : 0;
+  const budgetHardMax = participants.length ? Math.min(...participants.map((participant) => Math.min(participant.budgetHardMax, roundBudgetHardMax(participant.budgetTarget)))) : 0;
   const durationMin = participants.length ? Math.max(...participants.map((participant) => DURATION_BANDS[participant.durationBand].min)) : 0;
-  const durationMax = participants.length ? Math.min(...participants.map((participant) => DURATION_BANDS[participant.durationBand].max)) : 0;
+  const durationMax = participants.length ? Math.min(...participants.map((participant) => participant.durationMaxOverride ?? DURATION_BANDS[participant.durationBand].max)) : 0;
 
   const votes = specificActivities.map((category) => ({
     category,
@@ -66,20 +87,30 @@ export function aggregatePreferences(participants: ParticipantRecord[], candidat
       affectedParticipantIds: proposedDate ? participantIdsMissing(participants, 'acceptableDates', proposedDate) : participants.map((participant) => participant.id),
       proposedChanges: { acceptableDate: proposedDate },
     };
-  } else if (commonTimeWindows.length === 0) {
-    const windows = Object.keys(TIME_WINDOWS) as TimeWindow[];
-    const ranked = windows.map((window) => ({ window, count: participants.filter((participant) => participant.timeWindows.includes(window)).length })).sort((a, b) => b.count - a.count);
-    const proposedWindow = ranked[0]?.window ?? 'evening';
+  } else if (!commonTimeRanges.some((range) => range.end - range.start >= durationMin) && durationMin <= durationMax) {
+    const adjustable = participants.filter((person) => (person.timeExtensionMinutes ?? 0) < 60);
+    let adjustment: { ids: string[]; minutes: number } | null = null;
+    for (let count = 1; count <= adjustable.length && !adjustment; count++) {
+      for (const minutes of [30, 60]) {
+        for (let mask = 1; mask < 2 ** adjustable.length; mask++) {
+          const ids = adjustable.filter((_, index) => mask & (1 << index)).map((person) => person.id);
+          if (ids.length !== count) continue;
+          const changed = participants.map((person) => ids.includes(person.id) ? { ...person, timeExtensionMinutes: Math.max(person.timeExtensionMinutes ?? 0, minutes) } : person);
+          if (sharedTimeRanges(changed).some((range) => range.end - range.start >= durationMin)) { adjustment = { ids, minutes }; break; }
+        }
+        if (adjustment) break;
+      }
+    }
     conflict = {
       kind: 'time',
-      title: 'A small time shift opens options',
-      description: `Ask the highlighted people to also accept the ${proposedWindow} window.`,
-      affectedParticipantIds: participantIdsMissing(participants, 'timeWindows', proposedWindow),
-      proposedChanges: { timeWindow: proposedWindow, widenMinutes: 60 },
+      title: adjustment ? 'A wider time window opens options' : 'Choose a new shared time',
+      description: adjustment ? `Ask the highlighted people to allow their selected windows to start up to ${adjustment.minutes} minutes earlier and end up to ${adjustment.minutes} minutes later.` : 'A 60-minute adjustment is not enough for the requested duration. Edit your time windows or duration to find an overlap.',
+      affectedParticipantIds: adjustment?.ids ?? [],
+      proposedChanges: adjustment ? { timeExtensionMinutes: adjustment.minutes } : {},
     };
   } else if (durationMin > durationMax) {
     const proposedMax = Math.min(420, durationMin);
-    const affected = participants.filter((participant) => DURATION_BANDS[participant.durationBand].max < durationMin).map((participant) => participant.id);
+    const affected = participants.filter((participant) => (participant.durationMaxOverride ?? DURATION_BANDS[participant.durationBand].max) < durationMin).map((participant) => participant.id);
     conflict = {
       kind: 'duration',
       title: 'The group needs a little more time',
@@ -93,8 +124,9 @@ export function aggregatePreferences(participants: ParticipantRecord[], candidat
     participantCount: participants.length,
     selectedDate: commonDates[0] ?? null,
     commonDates,
-    selectedTimeWindow: commonTimeWindows[0] ?? null,
+    selectedTimeWindow: commonTimeWindows[0] ?? participants[0]?.timeWindows.find((window) => commonTimeRanges.some((range) => range.start >= TIME_WINDOWS[window].start && range.start < TIME_WINDOWS[window].end)) ?? null,
     commonTimeWindows,
+    commonTimeRanges,
     budgetTarget,
     budgetHardMax,
     rankedActivities: votes,
@@ -107,7 +139,7 @@ export function aggregatePreferences(participants: ParticipantRecord[], candidat
 }
 
 export function roundBudgetHardMax(target: number) {
-  return Math.ceil((target * 1.15) / 100) * 100;
+  return Math.floor(target * 115 / 100);
 }
 
 export function formatDate(value: string) {
@@ -149,7 +181,38 @@ function qualityScore(venue: Venue) {
   return Math.max(0, Math.min(100, ((venue.rating - 3) / 2) * 70 + confidence * 30));
 }
 
-function buildPlan(pair: CandidatePair, agreement: GroupAgreement, rank: number, label: OutingPlan['label']): OutingPlan {
+export function venueOpenFor(venue: Venue, date: string, start: number, end: number): boolean {
+  // Reference catalogue entries are only allowed in explicitly marked preview mode.
+  if (!venue.openingPeriods.length) return venue.source === 'outly_fallback';
+  const day = new Date(`${date}T12:00:00Z`).getUTCDay();
+  const from = day * 1440 + start;
+  const to = day * 1440 + end;
+  return venue.openingPeriods.some((period) => {
+    if (!period.close) return period.open.day === 0 && period.open.hour === 0 && period.open.minute === 0;
+    const open = period.open.day * 1440 + period.open.hour * 60 + period.open.minute;
+    let close = period.close.day * 1440 + period.close.hour * 60 + period.close.minute;
+    if (close <= open) close += 7 * 1440;
+    return [-7 * 1440, 0, 7 * 1440].some((offset) => from >= open + offset && to <= close + offset);
+  });
+}
+
+function schedulePair(pair: CandidatePair, agreement: GroupAgreement): number | null {
+  if (!agreement.selectedDate || !agreement.selectedTimeWindow || agreement.conflict) return null;
+  const activityDuration = pair.activity.durationMinutes ?? 90;
+  const diningDuration = agreement.foodPreference === 'meal' ? 75 : 50;
+  const duration = activityDuration + pair.betweenMinutes + diningDuration;
+  if (duration < agreement.durationMin || duration > agreement.durationMax) return null;
+  const ranges = agreement.commonTimeRanges ?? [TIME_WINDOWS[agreement.selectedTimeWindow]];
+  for (const range of ranges) {
+    for (let start = range.start; start + duration <= range.end; start += 15) {
+      const diningStart = start + activityDuration + pair.betweenMinutes;
+      if (venueOpenFor(pair.activity, agreement.selectedDate, start, start + activityDuration) && venueOpenFor(pair.dining, agreement.selectedDate, diningStart, start + duration)) return start;
+    }
+  }
+  return null;
+}
+
+function buildPlan(pair: CandidatePair, agreement: GroupAgreement, rank: number, label: OutingPlan['label'], startMinute: number): OutingPlan {
   const selectedActivity = agreement.rankedActivities[0];
   const activityVotes = agreement.rankedActivities.find((item) => pair.activity.categories.includes(item.category))?.votes ?? 0;
   const preferenceScore = agreement.participantCount ? (activityVotes / agreement.participantCount) * 100 : 0;
@@ -158,12 +221,11 @@ function buildPlan(pair: CandidatePair, agreement: GroupAgreement, rank: number,
   const variance = pair.travel.length ? pair.travel.reduce((sum, item) => sum + Math.abs(item.minutes - travelAverage), 0) / pair.travel.length : 0;
   const travelScore = Math.max(0, 100 - maxTravel * 1.2 - variance * 1.5);
   const knownCost = (pair.activity.priceMax ?? 0) + (pair.dining.priceMax ?? 0);
-  const budgetScore = agreement.budgetTarget ? Math.max(0, 100 - Math.abs(agreement.budgetTarget - knownCost) / agreement.budgetTarget * 80) : 60;
+  const budgetScore = agreement.budgetTarget ? Math.max(0, 100 - knownCost / agreement.budgetHardMax * 50) : 60;
   const venueScore = (qualityScore(pair.activity) + qualityScore(pair.dining)) / 2;
   const convenienceScore = Math.max(0, 100 - pair.betweenMinutes * 3);
   const score = Math.round(preferenceScore * 0.3 + travelScore * 0.25 + budgetScore * 0.2 + venueScore * 0.15 + convenienceScore * 0.1);
   const window = agreement.selectedTimeWindow ?? 'evening';
-  const startMinute = TIME_WINDOWS[window].start + 30;
   const activityDuration = pair.activity.durationMinutes ?? 90;
   const diningDuration = agreement.foodPreference === 'meal' ? 75 : 50;
   const diningStart = startMinute + activityDuration + pair.betweenMinutes;
@@ -192,6 +254,8 @@ function buildPlan(pair: CandidatePair, agreement: GroupAgreement, rank: number,
     endTime: minutesToTime(endMinute),
     knownCost,
     hasUnknownActivityCost: pair.activity.priceMax === null,
+    hasUnknownDiningCost: pair.dining.priceMax === null,
+    hoursVerificationRequired: !pair.activity.openingPeriods.length || !pair.dining.openingPeriods.length,
     dietaryVerificationRequired: agreement.dietary.length > 0 && !pair.dining.dietaryVerified,
     travel: pair.travel,
     stops: [
@@ -219,32 +283,35 @@ function buildPlan(pair: CandidatePair, agreement: GroupAgreement, rank: number,
 }
 
 export function selectPlans(pairs: CandidatePair[], participants: ParticipantRecord[], agreement: GroupAgreement) {
+  if (participants.length < 2 || agreement.conflict) return [];
   const viable = pairs.filter((pair) => {
     const knownCost = (pair.activity.priceMax ?? 0) + (pair.dining.priceMax ?? 0);
-    const travelFits = pair.travel.every((travel) => {
-      const participant = participants.find((item) => item.id === travel.participantId);
-      return participant ? travel.minutes <= participant.travelMaxMinutes + 5 : false;
+    const travelFits = participants.every((participant) => {
+      const travel = pair.travel.find((item) => item.participantId === participant.id);
+      return travel && travel.mode === participant.travelMode && Number.isFinite(travel.minutes) && travel.minutes >= 0 && travel.minutes <= participant.travelMaxMinutes;
     });
-    const duration = (pair.activity.durationMinutes ?? 90) + pair.betweenMinutes + (agreement.foodPreference === 'meal' ? 75 : 50);
-    return knownCost <= agreement.budgetHardMax && travelFits && duration <= agreement.durationMax;
+    const dietaryFits = agreement.dietary.every((requirement) => pair.dining.dietaryVerified && pair.dining.dietary.includes(requirement));
+    const linksFit = [pair.activity, pair.dining].every((venue) => /^https?:\/\//.test(actionFor(venue).url));
+    const liveTravelFits = pair.activity.source === 'outly_fallback' || pair.travel.every((travel) => !travel.estimated);
+    return knownCost <= agreement.budgetHardMax && knownCost >= 0 && travelFits && liveTravelFits && dietaryFits && linksFit && schedulePair(pair, agreement) !== null;
   });
 
-  const base = viable.map((pair) => buildPlan(pair, agreement, 0, 'Best overall fit'));
+  const base = viable.map((pair) => buildPlan(pair, agreement, 0, 'Best overall fit', schedulePair(pair, agreement)!));
   const bestOverall = [...base].sort((a, b) => b.score - a.score)[0];
   const selections: OutingPlan[] = [];
 
   const add = (plan: OutingPlan | undefined, label: OutingPlan['label']) => {
-    if (!plan || selections.some((item) => item.title === plan.title)) return;
+    if (!plan || selections.some((item) => item.stops[0].venue.placeId === plan.stops[0].venue.placeId)) return;
     selections.push({ ...plan, id: crypto.randomUUID(), rank: selections.length + 1, label });
   };
   add(bestOverall, 'Best overall fit');
   const easiest = [...base]
-    .filter((plan) => !selections.some((item) => item.title === plan.title))
+    .filter((plan) => !selections.some((item) => item.stops[0].venue.placeId === plan.stops[0].venue.placeId))
     .sort((a, b) => Math.max(...a.travel.map((item) => item.minutes)) - Math.max(...b.travel.map((item) => item.minutes)))[0];
   add(easiest, 'Easiest commute');
   const bestValue = [...base]
-    .filter((plan) => !selections.some((item) => item.title === plan.title))
-    .sort((a, b) => a.knownCost - b.knownCost)[0];
+    .filter((plan) => !selections.some((item) => item.stops[0].venue.placeId === plan.stops[0].venue.placeId))
+    .sort((a, b) => Number(a.hasUnknownActivityCost || a.hasUnknownDiningCost) - Number(b.hasUnknownActivityCost || b.hasUnknownDiningCost) || a.knownCost - b.knownCost)[0];
   add(bestValue, 'Best value');
 
   for (const plan of [...base].sort((a, b) => b.score - a.score)) {
@@ -256,13 +323,14 @@ export function selectPlans(pairs: CandidatePair[], participants: ParticipantRec
   return selections;
 }
 
-export function buildInventoryConflict(participants: ParticipantRecord[], agreement: GroupAgreement): ConflictSuggestion {
-  const tightTravel = [...participants].sort((a, b) => a.travelMaxMinutes - b.travelMaxMinutes)[0];
-  if (tightTravel && tightTravel.travelMaxMinutes < 60) {
+export function buildInventoryConflict(participants: ParticipantRecord[], agreement: GroupAgreement, pairs: CandidatePair[] = []): ConflictSuggestion {
+  const tightTravel = [...participants].sort((a, b) => a.travelMaxMinutes - b.travelMaxMinutes).find((person) =>
+    person.travelMaxMinutes <= 90 && selectPlans(pairs, participants.map((item) => item.id === person.id ? { ...item, travelMaxMinutes: item.travelMaxMinutes + 5 } : item), agreement).length > 0);
+  if (tightTravel) {
     return {
       kind: 'travel',
       title: 'Five more travel minutes could unlock plans',
-      description: `${tightTravel.displayName} has the tightest journey limit. Increasing it from ${tightTravel.travelMaxMinutes} to ${tightTravel.travelMaxMinutes + 5} minutes may open better shared areas.`,
+      description: `Increasing the highlighted participant’s travel limit from ${tightTravel.travelMaxMinutes} to ${tightTravel.travelMaxMinutes + 5} minutes unlocks a pairing from the options just checked.`,
       affectedParticipantIds: [tightTravel.id],
       proposedChanges: { participantId: tightTravel.id, travelMaxMinutes: tightTravel.travelMaxMinutes + 5 },
     };
@@ -270,8 +338,8 @@ export function buildInventoryConflict(participants: ParticipantRecord[], agreem
   return {
     kind: 'inventory',
     title: 'No honest match yet',
-    description: `No available activity-and-food pairing fits the group’s known-cost ceiling of ₹${agreement.budgetHardMax.toLocaleString('en-IN')} and current travel limits.`,
-    affectedParticipantIds: participants.map((participant) => participant.id),
-    proposedChanges: { regenerate: true },
+    description: agreement.dietary.length ? 'No pairing satisfies the group’s dietary requirements with verified venue information, timing, travel and known costs. Keep those requirements and try other times or areas.' : 'No pairing fits the shared time, duration, travel, opening hours and known-cost limits. Edit the group’s answers or retry when more venue information is available.',
+    affectedParticipantIds: [],
+    proposedChanges: {},
   };
 }

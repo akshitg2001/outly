@@ -40,6 +40,8 @@ export const participants = sqliteTable('participants', {
   foodPreference: text('food_preference').notNull(),
   dietary: text('dietary').notNull(),
   durationBand: text('duration_band').notNull(),
+  timeExtensionMinutes: integer('time_extension_minutes').notNull().default(0),
+  durationMaxOverride: integer('duration_max_override'),
   submittedAt: integer('submitted_at').notNull(),
   updatedAt: integer('updated_at').notNull(),
 }, (table) => [

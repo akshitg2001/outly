@@ -177,18 +177,23 @@ export async function autocompleteOrigins(query: string) {
 }
 
 export async function resolveOrigin(placeId: string | null | undefined, label: string) {
-  const preview = DELHI_ORIGINS.find((origin) => origin.placeId === placeId || origin.label.toLowerCase() === label.toLowerCase());
-  if (preview) return { lat: preview.lat, lng: preview.lng, label: preview.label, placeId: preview.placeId };
   const key = runtimeValue('GOOGLE_MAPS_API_KEY');
-  if (!key || !placeId) return { lat: DELHI_CENTER.latitude, lng: DELHI_CENTER.longitude, label, placeId: placeId ?? null };
+  if (!key) {
+    const preview = DELHI_ORIGINS.find((origin) => origin.placeId === placeId);
+    if (!preview) throw new Error('Choose a starting location from the suggestions.');
+    return { lat: preview.lat, lng: preview.lng, label: preview.label, placeId: preview.placeId };
+  }
+  if (!placeId || placeId.startsWith('preview:')) throw new Error('Choose your starting location again from the live suggestions.');
   const response = await fetch(`https://places.googleapis.com/v1/places/${encodeURIComponent(placeId)}`, {
     headers: { 'X-Goog-Api-Key': key, 'X-Goog-FieldMask': 'id,displayName,formattedAddress,location' },
   });
   if (!response.ok) throw new Error(`Place details failed (${response.status})`);
   const place = await response.json() as { id?: string; formattedAddress?: string; location?: { latitude?: number; longitude?: number } };
+  if (!Number.isFinite(place.location?.latitude) || !Number.isFinite(place.location?.longitude)) throw new Error('That location could not be located. Choose another suggestion.');
+  if (haversine({ lat: place.location!.latitude!, lng: place.location!.longitude! }, { lat: DELHI_CENTER.latitude, lng: DELHI_CENTER.longitude }) > 100) throw new Error('The pilot currently supports starting locations within Delhi NCR.');
   return {
-    lat: place.location?.latitude ?? DELHI_CENTER.latitude,
-    lng: place.location?.longitude ?? DELHI_CENTER.longitude,
+    lat: place.location!.latitude!,
+    lng: place.location!.longitude!,
     label: place.formattedAddress ?? label,
     placeId: place.id ?? placeId,
   };
@@ -217,18 +222,26 @@ export async function discoverVenues(participants: ParticipantRecord[], agreemen
     ]);
     const results = (await Promise.all(searches)).flat();
     const unique = [...new Map(results.map((venue) => [venue.placeId, venue])).values()];
-    const activityCount = unique.filter((venue) => venue.kind === 'activity').length;
-    const diningCount = unique.filter((venue) => venue.kind === 'dining').length;
-    if (activityCount < 2 || diningCount < 2) return { venues: [...unique, ...fallbackVenues], mode: 'preview' as const };
     return { venues: unique, mode: 'live' as const };
   } catch {
-    return { venues: fallbackVenues, mode: 'preview' as const };
+    throw new Error('Venue search is temporarily unavailable. Your agreement is saved; try generating plans again shortly.');
   }
 }
 
 async function routeMatrix(participants: ParticipantRecord[], destinations: Venue[], mode: TravelMode, departureTime: string) {
   const key = runtimeValue('GOOGLE_MAPS_API_KEY');
   if (!key) return null;
+  if (!participants.length || !destinations.length) return [];
+  // Keep transit requests below 100 elements; preserve indexes across chunks.
+  const chunkSize = Math.max(1, Math.floor(100 / participants.length));
+  if (destinations.length > chunkSize) {
+    const output: Array<{ originIndex?: number; destinationIndex?: number; duration?: string; condition?: string }> = [];
+    for (let offset = 0; offset < destinations.length; offset += chunkSize) {
+      const chunk = await routeMatrix(participants, destinations.slice(offset, offset + chunkSize), mode, departureTime);
+      output.push(...(chunk ?? []).map((element) => ({ ...element, destinationIndex: element.destinationIndex === undefined ? undefined : element.destinationIndex + offset })));
+    }
+    return output;
+  }
   const origins = participants.map((participant) => ({ waypoint: { location: { latLng: { latitude: participant.originLat, longitude: participant.originLng } } } }));
   const destinationPayload = destinations.map((destination) => ({ waypoint: { location: { latLng: { latitude: destination.lat, longitude: destination.lng } } } }));
   const body: Record<string, unknown> = {
@@ -267,32 +280,48 @@ export async function pairCandidates(venues: Venue[], participants: ParticipantR
   const date = agreement.selectedDate ?? new Date(Date.now() + 86400000).toISOString().slice(0, 10);
   const departure = departureIso(date, agreement);
   const travelLookup = new Map<string, number>();
-  let liveRoutes = Boolean(runtimeValue('GOOGLE_MAPS_API_KEY'));
+  const liveRoutes = Boolean(runtimeValue('GOOGLE_MAPS_API_KEY'));
+  const betweenLookup = new Map<string, number[]>();
 
   try {
     for (const mode of ['drive', 'transit'] as const) {
       const group = participants.filter((participant) => participant.travelMode === mode && participant.originLat !== null && participant.originLng !== null);
       if (!group.length) continue;
       const matrix = await routeMatrix(group, uniqueActivities, mode, departure);
-      if (!matrix) { liveRoutes = false; continue; }
+      if (!matrix) continue;
       matrix.forEach((element) => {
         if (element.condition !== 'ROUTE_EXISTS' || element.originIndex === undefined || element.destinationIndex === undefined) return;
-        const seconds = Number(element.duration?.replace('s', '') ?? 0);
+        const seconds = Number(element.duration?.replace('s', '') ?? NaN);
+        if (!Number.isFinite(seconds) || seconds < 0 || !group[element.originIndex] || !uniqueActivities[element.destinationIndex]) return;
         travelLookup.set(`${group[element.originIndex].id}:${uniqueActivities[element.destinationIndex].placeId}`, Math.max(1, Math.ceil(seconds / 60)));
       });
+      if (liveRoutes) {
+        for (const activity of uniqueActivities) {
+          const stops = pairs.filter((pair) => pair.activity.placeId === activity.placeId).map((pair) => pair.dining);
+          const from = { ...group[0], originLat: activity.lat, originLng: activity.lng };
+          const transferTime = new Date(new Date(departure).getTime() + (activity.durationMinutes ?? 90) * 60000).toISOString();
+          const transfers = await routeMatrix([from], stops, mode, transferTime);
+          stops.forEach((stop, index) => {
+            const element = transfers?.find((item) => item.destinationIndex === index && item.condition === 'ROUTE_EXISTS');
+            const seconds = Number(element?.duration?.replace('s', '') ?? NaN);
+            const key = `${activity.placeId}:${stop.placeId}`;
+            betweenLookup.set(key, [...(betweenLookup.get(key) ?? []), Number.isFinite(seconds) ? Math.ceil(seconds / 60) : Infinity]);
+          });
+        }
+      }
     }
   } catch {
-    liveRoutes = false;
+    throw new Error('Travel estimates are temporarily unavailable. Your agreement is saved; retry before choosing a plan.');
   }
 
   return pairs.map((pair) => ({
     ...pair,
-    betweenMinutes: Math.max(5, previewMinutes(pair.activity, pair.dining, 'drive')),
+    betweenMinutes: liveRoutes ? Math.max(...(betweenLookup.get(`${pair.activity.placeId}:${pair.dining.placeId}`) ?? [Infinity])) : Math.max(5, ...participants.map((person) => previewMinutes(pair.activity, pair.dining, person.travelMode))),
     travel: participants.map((participant) => ({
       participantId: participant.id,
       participantName: participant.displayName,
       mode: participant.travelMode,
-      minutes: travelLookup.get(`${participant.id}:${pair.activity.placeId}`) ?? previewMinutes({ lat: participant.originLat ?? DELHI_CENTER.latitude, lng: participant.originLng ?? DELHI_CENTER.longitude }, pair.activity, participant.travelMode),
+      minutes: travelLookup.get(`${participant.id}:${pair.activity.placeId}`) ?? (liveRoutes ? Infinity : previewMinutes({ lat: participant.originLat ?? DELHI_CENTER.latitude, lng: participant.originLng ?? DELHI_CENTER.longitude }, pair.activity, participant.travelMode)),
       estimated: !liveRoutes,
     })),
   }));
