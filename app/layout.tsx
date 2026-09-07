@@ -1,5 +1,5 @@
 import type { Metadata } from 'next';
-import { Geist, Geist_Mono } from 'next/font/google';
+import { Geist, Geist_Mono, Newsreader } from 'next/font/google';
 import './globals.css';
 
 const geistSans = Geist({
@@ -12,10 +12,15 @@ const geistMono = Geist_Mono({
   subsets: ['latin'],
 });
 
+const newsreader = Newsreader({
+  variable: '--font-newsreader',
+  subsets: ['latin'],
+});
+
 export const metadata: Metadata = {
   metadataBase: new URL('https://outly-planner.akshitg2001.chatgpt.site'),
-  title: 'Outly — AI outing planner',
-  description: 'Personalised, bookable local outing plans in seconds.',
+  title: 'Outly — Delhi group outing planner',
+  description: 'Find a Delhi NCR outing that works for everyone’s time, travel and budget.',
   openGraph: {
     title: 'Outly — AI outing planner',
     description: 'Plan less. Go out better. Bookable local outings, made for you.',
@@ -37,7 +42,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
+        className={`${geistSans.variable} ${geistMono.variable} ${newsreader.variable} antialiased`}
       >
         {children}
       </body>
