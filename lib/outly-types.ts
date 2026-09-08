@@ -194,6 +194,7 @@ export type OutingPlan = {
 };
 
 export type PublicGroupView = {
+  selectedPlanId?: string | null;
   role: 'participant' | 'organizer';
   group: GroupRecord;
   participantNames: string[];

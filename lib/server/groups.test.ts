@@ -4,7 +4,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { ParticipantPreferenceInput } from '../outly-types';
 import * as google from './google';
-import { approveRelaxation, createGroup, createRelaxation, generatePlans, getGroupView, getOwnPreferences, lockGroup, submitParticipant, unlockGroup, voteForPlan } from './groups';
+import { approveRelaxation, createGroup, createRelaxation, generatePlans, getGroupView, getOwnPreferences, lockGroup, saveFeedback, selectFinalPlan, submitParticipant, unlockGroup, voteForPlan } from './groups';
 
 let sqlite: DatabaseSync;
 const runtime = vi.hoisted(() => ({ database: null as unknown }));
@@ -146,5 +146,36 @@ describe('database-backed group journey', () => {
     const submitted = await Promise.allSettled(Array.from({ length: 11 }, (_, index) => submitParticipant(outing.joinToken, answer(index))));
     expect(submitted.filter((result) => result.status === 'fulfilled')).toHaveLength(10);
     expect((await getGroupView(outing.joinToken)).submittedCount).toBe(10);
+  });
+
+  it('requires a verified participant to vote or submit feedback', async () => {
+    const outing = await group();
+    await submitParticipant(outing.joinToken, answer(0));
+    await submitParticipant(outing.joinToken, answer(1));
+    await lockGroup(outing.organizerToken);
+    const generated = await generatePlans(outing.organizerToken);
+    const planId = generated.plans[0].id;
+
+    await expect(voteForPlan(outing.joinToken, planId, 'unverified-browser-key')).rejects.toThrow('device you used');
+    await expect(saveFeedback(outing.joinToken, 'unverified-browser-key', 4, true)).rejects.toThrow('device you used');
+
+    await voteForPlan(outing.joinToken, planId, token(0));
+    await saveFeedback(outing.joinToken, token(0), 4, true);
+    await saveFeedback(outing.joinToken, token(0), 5, false);
+    expect(sqlite.prepare('SELECT usefulness, reuse FROM feedback').get()).toMatchObject({ usefulness: 5, reuse: 0 });
+  });
+
+  it('allows only the organizer to choose the final plan and shares that choice', async () => {
+    const outing = await group();
+    await submitParticipant(outing.joinToken, answer(0));
+    await submitParticipant(outing.joinToken, answer(1));
+    await lockGroup(outing.organizerToken);
+    const generated = await generatePlans(outing.organizerToken);
+    const planId = generated.plans[0].id;
+
+    await expect(selectFinalPlan(outing.joinToken, planId)).rejects.toThrow('Only the organizer');
+    await selectFinalPlan(outing.organizerToken, planId);
+    expect((await getGroupView(outing.joinToken)).selectedPlanId).toBe(planId);
+    expect((await getGroupView(outing.organizerToken)).selectedPlanId).toBe(planId);
   });
 });

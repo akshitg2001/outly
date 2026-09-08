@@ -141,3 +141,23 @@ export const productEvents = sqliteTable('product_events', {
   index('idx_product_events_event_created').on(table.eventName, table.createdAt),
   index('idx_product_events_group_id').on(table.groupId),
 ]);
+
+export const selections = sqliteTable('selections', {
+  groupId: text('group_id').primaryKey().references(() => groups.id, { onDelete: 'cascade' }),
+  planId: text('plan_id').notNull().references(() => plans.id, { onDelete: 'cascade' }),
+  selectedAt: integer('selected_at').notNull(),
+});
+
+export const feedback = sqliteTable('feedback', {
+  groupId: text('group_id').notNull().references(() => groups.id, { onDelete: 'cascade' }),
+  actorHash: text('actor_hash').notNull(),
+  usefulness: integer('usefulness').notNull(),
+  reuse: integer('reuse').notNull(),
+  updatedAt: integer('updated_at').notNull(),
+}, (table) => [uniqueIndex('idx_feedback_group_actor').on(table.groupId, table.actorHash)]);
+
+export const rateLimits = sqliteTable('rate_limits', {
+  key: text('key').primaryKey(),
+  count: integer('count').notNull(),
+  expiresAt: integer('expires_at').notNull(),
+}, (table) => [index('idx_rate_limits_expiry').on(table.expiresAt)]);

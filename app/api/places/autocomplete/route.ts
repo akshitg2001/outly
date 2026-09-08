@@ -1,11 +1,13 @@
 import { autocompleteOrigins, googleApiAvailable } from '@/lib/server/google';
+import { apiError, limitRequest } from '@/lib/server/request-limits';
 
 export async function GET(request: Request) {
   try {
+    await limitRequest(request, 'autocomplete', 240, 60);
     const query = new URL(request.url).searchParams.get('q') ?? '';
     const suggestions = await autocompleteOrigins(query);
-    return Response.json({ suggestions, dataMode: googleApiAvailable() ? 'live' : 'preview' }, { headers: { 'Cache-Control': 'private, max-age=300' } });
+    return Response.json({ suggestions, dataMode: googleApiAvailable() ? 'live' : 'preview' }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (error) {
-    return Response.json({ error: error instanceof Error ? error.message : 'Location search is unavailable.' }, { status: 502 });
+    return apiError(error);
   }
 }

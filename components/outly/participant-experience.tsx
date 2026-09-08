@@ -9,6 +9,7 @@ import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Slider } from '@/components/ui/slider';
 import { ACTIVITY_LABELS, DURATION_BANDS, TIME_WINDOW_LABELS, type ActivityCategory, type DurationBand, type FoodPreference, type TimeWindow, type TravelMode } from '@/lib/outly-types';
 import { formatDate, roundBudgetHardMax } from '@/lib/recommendation';
+import { missingPreferences, normalizeDietary } from '@/lib/preferences';
 import type { ParticipantRecord } from '@/lib/outly-types';
 import { LocationCombobox } from './location-combobox';
 import { ErrorPanel, LoadingPanel, SiteHeader } from './site-header';
@@ -51,7 +52,8 @@ export function ParticipantExperience({ token }: { token: string }) {
     if (storedId && storedToken) { setParticipantId(storedId); setSubmitted(true); setEditing(false); }
   }, [view]);
 
-  const complete = useMemo(() => displayName.trim().length >= 2 && Boolean(origin.placeId) && dates.length > 0 && timeWindows.length > 0 && activities.length > 0, [activities, dates, displayName, origin.placeId, timeWindows]);
+  const missing = useMemo(() => missingPreferences({ name: displayName, placeId: origin.placeId, dates, windows: timeWindows, activities }), [activities, dates, displayName, origin.placeId, timeWindows]);
+  const complete = missing.length === 0;
   const toggle = <T,>(current: T[], value: T, set: (next: T[]) => void) => set(current.includes(value) ? current.filter((item) => item !== value) : [...current, value]);
 
   async function submit() {
@@ -63,7 +65,7 @@ export function ParticipantExperience({ token }: { token: string }) {
         editToken = Array.from(crypto.getRandomValues(new Uint8Array(24)), (byte) => byte.toString(16).padStart(2, '0')).join('');
         window.localStorage.setItem(`outly_edit_token_${view.group.id}`, editToken);
       }
-      const requirements = [...dietary, ...(otherDietary.trim() ? [otherDietary.trim()] : [])];
+      const requirements = normalizeDietary([...dietary, ...(otherDietary.trim() ? [otherDietary.trim()] : [])]);
       const response = await fetch(`/api/groups/${encodeURIComponent(token)}/participants`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ displayName, originLabel: origin.label, originPlaceId: origin.placeId, travelMode, travelMaxMinutes: travelMax, budgetTarget: budget, acceptableDates: dates, timeWindows, activities, foodPreference: food, dietary: requirements, durationBand: duration, editToken }),
       });
@@ -140,7 +142,7 @@ export function ParticipantExperience({ token }: { token: string }) {
                 <FormSection number="02" title="Time and spend"><fieldset><legend className="field-label">Dates you can make</legend><div className="mt-2 grid gap-2 sm:grid-cols-2">{view.group.candidateDates.map((date) => <CheckChoice key={date} checked={dates.includes(date)} label={formatDate(date)} onChange={() => toggle(dates, date, setDates)} />)}</div></fieldset><fieldset className="mt-5"><legend className="field-label">Time windows</legend><div className="mt-2 grid gap-2 sm:grid-cols-2">{windows.map((window) => <CheckChoice key={window} checked={timeWindows.includes(window)} label={TIME_WINDOW_LABELS[window]} onChange={() => toggle(timeWindows, window, setTimeWindows)} />)}</div></fieldset><label className="field-label mt-6">Maximum spend per person<div className="relative mt-2"><IndianRupee className="absolute left-3 top-3.5 size-4 text-muted-foreground" /><Input type="number" min={300} max={20000} step={100} value={budget} onChange={(event) => setBudget(Number(event.target.value))} className="editorial-input pl-10" /></div><span className="mt-2 block text-xs font-normal text-muted-foreground">Outly targets ₹{budget.toLocaleString('en-IN')} and never exceeds ₹{roundBudgetHardMax(budget)} in known costs.</span></label></FormSection>
                 <FormSection number="03" title="The kind of plan"><fieldset><legend className="field-label">Activities that sound good</legend><div className="mt-2 grid gap-2 sm:grid-cols-2">{categories.map((category) => <CheckChoice key={category} checked={activities.includes(category)} label={ACTIVITY_LABELS[category]} onChange={() => category === 'anything' ? setActivities(['anything']) : toggle(activities.filter((item) => item !== 'anything'), category, setActivities)} />)}</div></fieldset><fieldset className="mt-6"><legend className="field-label">Food</legend><RadioGroup value={food} onValueChange={(value) => setFood(value as FoodPreference)} className="mt-2 grid grid-cols-2 gap-2"><RadioChoice value="meal" label="Proper meal" /><RadioChoice value="snacks" label="Snacks & drinks" /></RadioGroup></fieldset><fieldset className="mt-6"><legend className="field-label">Total duration</legend><RadioGroup value={duration} onValueChange={(value) => setDuration(value as DurationBand)} className="mt-2 grid grid-cols-2 gap-2">{durations.map((item) => <RadioChoice key={item.id} value={item.id} label={item.label} note={item.note} />)}</RadioGroup></fieldset></FormSection>
                 <FormSection number="04" title="Dietary needs"><div className="grid gap-2 sm:grid-cols-2">{[['vegetarian', 'Vegetarian options'], ['pure_veg', 'Pure veg venue'], ['no_alcohol', 'No-alcohol venue']].map(([value, label]) => <CheckChoice key={value} checked={dietary.includes(value)} label={label} onChange={() => toggle(dietary, value, setDietary)} />)}</div><label className="field-label mt-5">Allergy or other requirement <span className="font-normal text-muted-foreground">(optional)</span><Input value={otherDietary} onChange={(event) => setOtherDietary(event.target.value)} placeholder="e.g. severe nut allergy" className="editorial-input mt-2" /><span className="mt-2 block text-xs font-normal text-muted-foreground">Dining must have recorded confirmation of every requirement. Strict requirements may leave no matching options.</span></label></FormSection>
-                {formError && <p role="alert" className="mb-5 border-l-4 border-destructive bg-[#fbe9e7] px-4 py-3 text-sm text-destructive">{formError}</p>}<Button type="submit" disabled={!complete || busy} className="h-13 w-full rounded-none bg-signal text-base font-semibold text-white hover:bg-[#c93c25]">{busy ? 'Saving your response…' : submitted ? 'Update my preferences' : 'Add me to the plan'} {!busy && <ArrowRight />}</Button>
+                {missing.length > 0 && <div role="status" className="mb-5 border-l-4 border-signal bg-card p-4 text-sm"><p className="font-semibold">Before you can join:</p><ul className="mt-2 list-disc space-y-1 pl-5">{missing.map((item) => <li key={item}>{item}</li>)}</ul></div>}{formError && <p role="alert" className="mb-5 border-l-4 border-destructive bg-[#fbe9e7] px-4 py-3 text-sm text-destructive">{formError}</p>}<Button type="submit" disabled={!complete || busy} className="h-13 w-full rounded-none bg-signal text-base font-semibold text-white hover:bg-[#c93c25]">{busy ? 'Saving your response…' : submitted ? 'Update my preferences' : 'Add me to the plan'} {!busy && <ArrowRight />}</Button>
               </form>
             )}
           </section>

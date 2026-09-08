@@ -17,6 +17,7 @@ import { discoverVenues, pairCandidates, resolveOrigin } from './google';
 import { polishPlanSummaries } from './openai';
 import { getDatabase } from './runtime';
 import { hashToken, randomToken } from './security';
+import { normalizeDietary } from '../preferences';
 
 type GroupRow = {
   id: string;
@@ -148,7 +149,7 @@ function validateParticipant(input: ParticipantPreferenceInput, candidateDates: 
   const foodPreference: FoodPreference = input.foodPreference === 'snacks' ? 'snacks' : 'meal';
   const allowedDurations: DurationBand[] = ['quick', 'standard', 'extended', 'flexible'];
   const durationBand = allowedDurations.includes(input.durationBand) ? input.durationBand : 'standard';
-  const dietary = [...new Set((input.dietary ?? []).map(String).map((item) => item.trim().slice(0, 60)).filter(Boolean))].slice(0, 6);
+  const dietary = normalizeDietary((input.dietary ?? []).map(String).map((item) => item.trim().slice(0, 60))).slice(0, 6);
 
   if (displayName.length < 2) throw new Error('Add a name or nickname.');
   if (originLabel.length < 3) throw new Error('Choose a starting location.');
@@ -295,9 +296,11 @@ export async function getGroupView(token: string): Promise<PublicGroupView> {
   const voteRows = await getDatabase().prepare('SELECT plan_id, COUNT(*) AS count FROM votes WHERE group_id = ? GROUP BY plan_id').bind(group.id).all<{ plan_id: string; count: number }>();
   const votes = Object.fromEntries(voteRows.results.map((row) => [row.plan_id, Number(row.count)]));
   const latestRun = await getDatabase().prepare('SELECT source_mode FROM plan_runs WHERE group_id = ? ORDER BY created_at DESC LIMIT 1').bind(group.id).first<{ source_mode: 'live' | 'preview' }>();
+  const selected = await getDatabase().prepare('SELECT plan_id FROM selections WHERE group_id = ?').bind(group.id).first<{ plan_id: string }>();
 
   return {
     role,
+    selectedPlanId: group.status === 'planned' ? selected?.plan_id ?? null : null,
     group: { ...group, agreement: computed },
     participantNames: participants.map((participant) => participant.displayName),
     participantSummaries: participants.map((participant) => ({ id: participant.id, displayName: participant.displayName })),
@@ -501,11 +504,41 @@ export async function generatePlans(token: string) {
   return { plans, dataMode: discovery.mode };
 }
 
+async function verifiedActor(groupToken: string, privateKey: string) {
+  const lookup = await groupLookup(groupToken);
+  if (privateKey) {
+    const actorHash = await hashToken(privateKey);
+    const person = await getDatabase().prepare('SELECT id FROM participants WHERE group_id = ? AND edit_token_hash = ?').bind(lookup.group.id, actorHash).first();
+    if (person) return { ...lookup, actorHash };
+  }
+  if (lookup.role === 'organizer') return { ...lookup, actorHash: lookup.tokenHash };
+  throw new Error('Open this plan on the device you used to submit your preferences before voting or rating it.');
+}
+
+export async function selectFinalPlan(groupToken: string, planId: string) {
+  const { group, role } = await groupLookup(groupToken);
+  if (role !== 'organizer') throw new Error('Only the organizer can choose the final plan.');
+  const saved = await getDatabase().prepare(`INSERT INTO selections (group_id, plan_id, selected_at)
+    SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM plans JOIN groups ON groups.id = plans.group_id WHERE plans.id = ? AND groups.id = ? AND groups.status = 'planned')
+    ON CONFLICT(group_id) DO UPDATE SET plan_id = excluded.plan_id, selected_at = excluded.selected_at`)
+    .bind(group.id, planId, Date.now(), planId, group.id).run();
+  if (!saved.meta.changes) throw new Error('This plan is no longer available. Refresh the board.');
+  await event(group.id, 'plan_selected', null, { planId });
+}
+
+export async function saveFeedback(groupToken: string, privateKey: string, usefulness: number, reuse: boolean) {
+  const { group, actorHash } = await verifiedActor(groupToken, privateKey);
+  if (!Number.isInteger(usefulness) || usefulness < 1 || usefulness > 5 || typeof reuse !== 'boolean') throw new Error('Choose a score from 1 to 5 and whether you would use Outly again.');
+  if (group.status !== 'planned') throw new Error('Generate the plans before rating them.');
+  await getDatabase().prepare(`INSERT INTO feedback (group_id, actor_hash, usefulness, reuse, updated_at) VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(group_id, actor_hash) DO UPDATE SET usefulness = excluded.usefulness, reuse = excluded.reuse, updated_at = excluded.updated_at`)
+    .bind(group.id, actorHash, usefulness, reuse ? 1 : 0, Date.now()).run();
+}
+
 export async function voteForPlan(groupToken: string, planId: string, voterKey: string) {
-  const { group, tokenHash } = await groupLookup(groupToken);
+  const { group, actorHash: voterKeyHash } = await verifiedActor(groupToken, voterKey);
   const plan = await getDatabase().prepare('SELECT id FROM plans WHERE id = ? AND group_id = ? LIMIT 1').bind(planId, group.id).first<{ id: string }>();
   if (!plan) throw new Error('That plan is no longer available.');
-  const voterKeyHash = await hashToken(voterKey || tokenHash);
   const database = getDatabase();
   await database.batch([
     database.prepare('DELETE FROM votes WHERE group_id = ? AND voter_key_hash = ?').bind(group.id, voterKeyHash),
