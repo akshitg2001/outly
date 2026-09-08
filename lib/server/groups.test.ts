@@ -4,7 +4,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { ParticipantPreferenceInput } from '../outly-types';
 import * as google from './google';
-import { approveRelaxation, createGroup, createRelaxation, deleteGroup, deleteParticipant, generatePlans, getGroupView, getOwnPreferences, lockGroup, saveFeedback, selectFinalPlan, submitParticipant, unlockGroup, voteForPlan } from './groups';
+import { approveRelaxation, createGroup, createRelaxation, deleteGroup, deleteParticipant, generatePlans, getGroupView, getOwnPreferences, lockGroup, planStoragePayload, saveFeedback, selectFinalPlan, submitParticipant, unlockGroup, voteForPlan } from './groups';
 
 let sqlite: DatabaseSync;
 const runtime = vi.hoisted(() => ({ database: null as unknown }));
@@ -196,5 +196,18 @@ describe('database-backed group journey', () => {
     await expect(deleteGroup(outing.joinToken)).rejects.toThrow('Only the organizer');
     await deleteGroup(outing.organizerToken);
     await expect(getGroupView(outing.joinToken)).rejects.toThrow('invalid or has expired');
+  });
+
+  it('stores live plans as place references without restricted display or route fields', async () => {
+    const outing = await group();
+    await submitParticipant(outing.joinToken, answer(0)); await submitParticipant(outing.joinToken, answer(1));
+    await lockGroup(outing.organizerToken);
+    const plan = (await generatePlans(outing.organizerToken)).plans[0];
+    const stored = JSON.stringify(planStoragePayload({ ...plan, stops: plan.stops.map((stop) => ({ ...stop, venue: { ...stop.venue, source: 'google_places' as const } })) }, 'live'));
+    expect(stored).toContain('placeId');
+    expect(stored).not.toContain('National Gallery');
+    expect(stored).not.toContain('travel');
+    expect(stored).not.toContain('rating');
+    expect(stored).not.toContain('openingPeriods');
   });
 });

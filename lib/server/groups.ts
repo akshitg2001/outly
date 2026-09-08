@@ -13,7 +13,7 @@ import type {
   Venue,
 } from '../outly-types';
 import { aggregatePreferences, buildInventoryConflict, roundBudgetHardMax, selectPlans } from '../recommendation';
-import { discoverVenues, pairCandidates, resolveOrigin } from './google';
+import { discoverVenues, hydrateVenueDetails, pairCandidates, resolveOrigin } from './google';
 import { polishPlanSummaries } from './openai';
 import { getDatabase, runtimeValue } from './runtime';
 import { purgeExpiredRateLimits } from './request-limits';
@@ -72,6 +72,11 @@ type RelaxationRow = {
 };
 
 type PlanRow = { plan_json: string };
+type StoredLivePlan = {
+  storage: 'live-place-ids-v1'; id: string; rank: number; label: OutingPlan['label'];
+  activity: { placeId: string; area: string; categories: ActivityCategory[] };
+  dining: { placeId: string; area: string; categories: ActivityCategory[] };
+};
 
 const json = <T>(value: string | null, fallback: T): T => {
   try { return value ? JSON.parse(value) as T : fallback; } catch { return fallback; }
@@ -289,6 +294,32 @@ async function latestRelaxation(groupId: string) {
   return await getDatabase().prepare('SELECT * FROM relaxations WHERE group_id = ? ORDER BY created_at DESC LIMIT 1').bind(groupId).first<RelaxationRow>();
 }
 
+export function planStoragePayload(plan: OutingPlan, mode: 'live' | 'preview'): OutingPlan | StoredLivePlan {
+  if (mode === 'preview') return plan;
+  return {
+    storage: 'live-place-ids-v1', id: plan.id, rank: plan.rank, label: plan.label,
+    activity: { placeId: plan.stops[0].venue.placeId, area: plan.stops[0].venue.area, categories: plan.stops[0].venue.categories },
+    dining: { placeId: plan.stops[1].venue.placeId, area: plan.stops[1].venue.area, categories: plan.stops[1].venue.categories },
+  };
+}
+
+async function rehydrateLivePlans(rows: PlanRow[], participants: ParticipantRecord[], agreement: GroupAgreement) {
+  const output: OutingPlan[] = [];
+  for (const row of rows) {
+    const stored = json<StoredLivePlan | null>(row.plan_json, null);
+    if (!stored || stored.storage !== 'live-place-ids-v1') continue;
+    const details = await hydrateVenueDetails([
+      { ...stored.activity, kind: 'activity' },
+      { ...stored.dining, kind: 'dining' },
+    ]);
+    const venues = await venueOverrides(details);
+    const pairs = await pairCandidates(venues, participants, agreement);
+    const refreshed = selectPlans(pairs, participants, agreement)[0];
+    if (refreshed) output.push({ ...refreshed, id: stored.id, rank: stored.rank, label: stored.label });
+  }
+  return output.sort((a, b) => a.rank - b.rank);
+}
+
 export async function getGroupView(token: string): Promise<PublicGroupView> {
   await purgeExpiredOrigins();
   const { group, role } = await groupLookup(token);
@@ -300,15 +331,23 @@ export async function getGroupView(token: string): Promise<PublicGroupView> {
       affectedParticipantIds: json<string[]>(relaxation.affected_participant_ids, []), proposedChanges: json<Record<string, unknown>>(relaxation.proposed_changes, {}) } };
   }
   const planRows = await getDatabase().prepare('SELECT plan_json FROM plans WHERE group_id = ? ORDER BY created_at DESC, rank ASC LIMIT 3').bind(group.id).all<PlanRow>();
-  const plans = planRows.results.map((row) => json<OutingPlan>(row.plan_json, {} as OutingPlan)).filter((plan) => plan.id);
   const voteRows = await getDatabase().prepare('SELECT plan_id, COUNT(*) AS count FROM votes WHERE group_id = ? GROUP BY plan_id').bind(group.id).all<{ plan_id: string; count: number }>();
   const votes = Object.fromEntries(voteRows.results.map((row) => [row.plan_id, Number(row.count)]));
   const latestRun = await getDatabase().prepare('SELECT source_mode FROM plan_runs WHERE group_id = ? ORDER BY created_at DESC LIMIT 1').bind(group.id).first<{ source_mode: 'live' | 'preview' }>();
+  let planHydrationError: string | null = null;
+  let plans: OutingPlan[] = [];
+  if (group.status === 'planned') {
+    if (latestRun?.source_mode === 'live' && computed) {
+      try { plans = await rehydrateLivePlans(planRows.results, participants, computed); }
+      catch { planHydrationError = 'Live venue or travel details could not be refreshed. No stored sample data was substituted; retry shortly.'; }
+    } else plans = planRows.results.map((row) => json<OutingPlan>(row.plan_json, {} as OutingPlan)).filter((plan) => plan.id);
+  }
   const selected = await getDatabase().prepare('SELECT plan_id FROM selections WHERE group_id = ?').bind(group.id).first<{ plan_id: string }>();
 
   return {
     role,
     selectedPlanId: group.status === 'planned' ? selected?.plan_id ?? null : null,
+    planHydrationError,
     group: { ...group, agreement: computed },
     participantNames: participants.map((participant) => participant.displayName),
     participantSummaries: participants.map((participant) => ({ id: participant.id, displayName: participant.displayName })),
@@ -323,7 +362,7 @@ export async function getGroupView(token: string): Promise<PublicGroupView> {
       approvals: json<string[]>(relaxation.approvals, []),
       status: relaxation.status,
     } : null,
-    plans: group.status === 'planned' ? plans : [],
+    plans,
     votes,
     dataMode: latestRun?.source_mode,
   };
@@ -451,28 +490,12 @@ async function venueOverrides(venues: Venue[]) {
   });
 }
 
-async function cacheVenues(venues: Venue[]) {
-  const now = Date.now();
-  const statements = venues.filter((venue) => venue.source === 'google_places').map((venue) => getDatabase().prepare(`INSERT INTO venues
-    (id, place_id, kind, name, primary_type, address, area, lat, lng, rating, rating_count, price_level, price_min, price_max, hours_json,
-     image_ref, website_url, google_maps_url, booking_url, duration_minutes, categories, dietary, source, enabled, refreshed_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'google_places', 1, ?)
-    ON CONFLICT(place_id) DO UPDATE SET name = excluded.name, primary_type = excluded.primary_type, address = excluded.address, area = excluded.area,
-      lat = excluded.lat, lng = excluded.lng, rating = excluded.rating, rating_count = excluded.rating_count, price_level = excluded.price_level,
-      hours_json = excluded.hours_json, image_ref = excluded.image_ref, google_maps_url = excluded.google_maps_url, refreshed_at = excluded.refreshed_at`)
-    .bind(venue.id, venue.placeId, venue.kind, venue.name, venue.primaryType, venue.address, venue.area, venue.lat, venue.lng, venue.rating, venue.ratingCount,
-      venue.priceLevel, venue.priceMin, venue.priceMax, JSON.stringify(venue.openingPeriods), venue.imageUrl, venue.websiteUrl, venue.googleMapsUrl,
-      venue.bookingUrl, venue.durationMinutes, JSON.stringify(venue.categories), JSON.stringify(venue.dietary), now));
-  if (statements.length) await getDatabase().batch(statements);
-}
-
 export async function generatePlans(token: string) {
   const { group, role } = await groupLookup(token);
   if (role !== 'organizer') throw new Error('Only the organizer can generate plans.');
   if (group.status === 'collecting' || !group.agreement) throw new Error('Lock the group agreement before generating plans.');
   const participants = await participantsFor(group.id);
   const discovery = await discoverVenues(participants, group.agreement);
-  await cacheVenues(discovery.venues);
   const venues = await venueOverrides(discovery.venues);
   const pairs = await pairCandidates(venues, participants, group.agreement);
   let plans = selectPlans(pairs, participants, group.agreement);
@@ -503,7 +526,8 @@ export async function generatePlans(token: string) {
     ...plans.map((plan) => database.prepare(`INSERT INTO plans
       (id, run_id, group_id, rank, label, title, summary, score, known_cost, has_unknown_activity_cost, plan_json, created_at)
       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM plan_runs WHERE id = ?)`)
-      .bind(plan.id, runId, group.id, plan.rank, plan.label, plan.title, plan.summary, plan.score, plan.knownCost, plan.hasUnknownActivityCost ? 1 : 0, JSON.stringify(plan), now, runId)),
+      .bind(plan.id, runId, group.id, plan.rank, plan.label, discovery.mode === 'live' ? `Plan ${plan.rank}` : plan.title, discovery.mode === 'live' ? 'Live details are refreshed when opened.' : plan.summary,
+        discovery.mode === 'live' ? 0 : plan.score, discovery.mode === 'live' ? 0 : plan.knownCost, plan.hasUnknownActivityCost ? 1 : 0, JSON.stringify(planStoragePayload(plan, discovery.mode)), now, runId)),
     database.prepare("UPDATE groups SET status = 'planned', updated_at = MAX(updated_at + 1, ?) WHERE id = ? AND EXISTS (SELECT 1 FROM plan_runs WHERE id = ?)").bind(now, group.id, runId),
   ];
   const saved = await database.batch(statements);

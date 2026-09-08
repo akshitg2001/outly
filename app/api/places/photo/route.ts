@@ -15,7 +15,7 @@ export async function GET(request: Request) {
   return new Response(image.body, {
     headers: {
       'Content-Type': image.headers.get('Content-Type') ?? 'image/jpeg',
-      'Cache-Control': 'public, max-age=21600',
+      'Cache-Control': 'private, no-store',
     },
   });
 }

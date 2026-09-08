@@ -130,7 +130,24 @@ function placeToVenue(place: Record<string, any>, kind: Venue['kind'], area: str
     bookingUrl: null,
     source: 'google_places',
     dietaryVerified: Boolean(place.servesVegetarianFood),
+    photoAttributions: (place.photos?.[0]?.authorAttributions ?? []).map((item: Record<string, unknown>) => ({ displayName: String(item.displayName ?? 'Photo contributor'), uri: typeof item.uri === 'string' ? item.uri : null })),
   };
+}
+
+export async function hydrateVenueDetails(items: Array<{ placeId: string; kind: Venue['kind']; area: string; categories: ActivityCategory[] }>) {
+  const key = runtimeValue('GOOGLE_MAPS_API_KEY');
+  if (!key) throw new Error('Live venue details are not configured.');
+  const venues = await Promise.all(items.map(async (item) => {
+    const response = await fetch(`https://places.googleapis.com/v1/places/${encodeURIComponent(item.placeId)}`, {
+      headers: {
+        'X-Goog-Api-Key': key,
+        'X-Goog-FieldMask': 'id,displayName,formattedAddress,location,rating,userRatingCount,priceLevel,priceRange,regularOpeningHours,photos,websiteUri,googleMapsUri,googleMapsLinks,primaryType,servesVegetarianFood',
+      },
+    });
+    if (!response.ok) throw new Error(`Place details failed (${response.status})`);
+    return placeToVenue(await response.json() as Record<string, unknown>, item.kind, item.area, item.categories);
+  }));
+  return venues.filter((venue): venue is Venue => Boolean(venue));
 }
 
 async function textSearch(query: string, kind: Venue['kind'], area: string, categories: ActivityCategory[]) {

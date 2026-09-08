@@ -54,6 +54,7 @@ export function LocationCombobox({ value, placeId, onChange }: { value: string; 
       {open && suggestions.length > 0 && <div id={listId} role="listbox" className="absolute z-30 mt-1 max-h-64 w-full overflow-y-auto border border-foreground bg-card shadow-[6px_6px_0_#111]">{suggestions.map((suggestion, index) => <button id={`${listId}-${index}`} key={suggestion.placeId} type="button" role="option" aria-selected={active === index} onMouseDown={(event) => event.preventDefault()} onClick={() => choose(suggestion)} className={`block w-full border-b border-border px-4 py-3 text-left text-sm last:border-b-0 hover:bg-muted ${active === index ? 'bg-muted' : ''}`}>{suggestion.label}</button>)}</div>}
       <p role="status" className="mt-2 text-sm font-normal leading-5 text-muted-foreground">{message || (placeId ? 'Location selected.' : searching ? 'Finding locations…' : 'Choose a result from the suggestions to confirm your starting point.')}</p>
       {dataMode === 'preview' && <p className="mt-1 text-sm font-normal text-muted-foreground">Preview: eight sample neighbourhoods are available until live location search is connected.</p>}
+      {dataMode === 'live' && <p className="mt-1 text-xs font-normal text-muted-foreground">Location suggestions provided by Google Maps</p>}
     </div>
   );
 }

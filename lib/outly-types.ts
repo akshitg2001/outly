@@ -138,6 +138,7 @@ export type Venue = {
   bookingUrl: string | null;
   source: 'google_places' | 'outly_fallback' | 'admin';
   dietaryVerified: boolean;
+  photoAttributions?: Array<{ displayName: string; uri: string | null }>;
 };
 
 export type OpeningPeriod = {
@@ -195,6 +196,7 @@ export type OutingPlan = {
 
 export type PublicGroupView = {
   selectedPlanId?: string | null;
+  planHydrationError?: string | null;
   role: 'participant' | 'organizer';
   group: GroupRecord;
   participantNames: string[];

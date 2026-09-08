@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { discoverVenues, pairCandidates, resolveOrigin } from './google';
+import { discoverVenues, hydrateVenueDetails, pairCandidates, resolveOrigin } from './google';
 import { aggregatePreferences } from '../recommendation';
 import type { ParticipantRecord, Venue } from '../outly-types';
 
@@ -39,5 +39,10 @@ describe('live data failures', () => {
     await expect(resolveOrigin(null, 'Anywhere')).rejects.toThrow('suggestions');
     vi.stubGlobal('fetch', vi.fn(async () => Response.json({ id: 'abc' })));
     await expect(resolveOrigin('abc', 'Delhi')).rejects.toThrow('could not be located');
+  });
+  it('returns required photo author attribution with refreshed place details', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ id: 'abc', displayName: { text: 'Venue' }, formattedAddress: 'Delhi', location: { latitude: 28.6, longitude: 77.2 }, photos: [{ name: 'places/abc/photos/one', authorAttributions: [{ displayName: 'Contributor', uri: 'https://example.com/profile' }] }] })));
+    const result = await hydrateVenueDetails([{ placeId: 'abc', kind: 'activity', area: 'Delhi', categories: ['arts'] }]);
+    expect(result[0].photoAttributions).toEqual([{ displayName: 'Contributor', uri: 'https://example.com/profile' }]);
   });
 });
