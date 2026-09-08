@@ -1,5 +1,6 @@
 import { adminVenueList, updateVenueOverride } from '@/lib/server/groups';
 import { verifyAdminSession } from '@/lib/server/security';
+import { apiError, limitRequest, readJson } from '@/lib/server/request-limits';
 
 export async function GET(request: Request) {
   if (!await verifyAdminSession(request)) return Response.json({ error: 'Admin access required.' }, { status: 401 });
@@ -9,9 +10,10 @@ export async function GET(request: Request) {
 export async function PATCH(request: Request) {
   if (!await verifyAdminSession(request)) return Response.json({ error: 'Admin access required.' }, { status: 401 });
   try {
-    await updateVenueOverride(await request.json());
+    await limitRequest(request, 'admin-venue-update', 60, 60);
+    await updateVenueOverride(await readJson<Record<string, unknown>>(request, 16_384));
     return Response.json({ ok: true });
   } catch (error) {
-    return Response.json({ error: error instanceof Error ? error.message : 'Could not update the venue.' }, { status: 400 });
+    return apiError(error);
   }
 }

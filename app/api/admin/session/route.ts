@@ -1,6 +1,6 @@
 import { adminCookie, createAdminSession, verifyAdminSession } from '@/lib/server/security';
 import { runtimeValue } from '@/lib/server/runtime';
-import { apiError, limitRequest } from '@/lib/server/request-limits';
+import { apiError, limitRequest, readJson } from '@/lib/server/request-limits';
 
 export async function GET(request: Request) {
   return Response.json({ authenticated: await verifyAdminSession(request), configured: Boolean(runtimeValue('ADMIN_PASSCODE')) });
@@ -9,7 +9,7 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   try {
     await limitRequest(request, 'admin-login', 5, 900);
-    const input = await request.json() as { passcode?: string };
+    const input = await readJson<{ passcode?: string }>(request, 2_048);
     const expected = runtimeValue('ADMIN_PASSCODE');
     if (!expected) return Response.json({ error: 'Set ADMIN_PASSCODE before using the admin area.' }, { status: 503 });
     if (input.passcode !== expected) return Response.json({ error: 'Incorrect passcode.' }, { status: 401 });

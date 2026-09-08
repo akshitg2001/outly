@@ -15,11 +15,13 @@ export function OrganizerDashboard({ token, joinToken }: { token: string; joinTo
   const [copied, setCopied] = useState(false);
 
   async function action(name: string) {
+    if (name === 'delete_group' && !window.confirm('Delete this outing and every response permanently? This cannot be undone.')) return;
     setBusy(name); setActionError('');
     try {
       const response = await fetch(`/api/groups/${encodeURIComponent(token)}/actions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: name }) });
       const payload = await response.json() as { error?: string };
       if (!response.ok) throw new Error(payload.error ?? 'Could not complete that action.');
+      if (name === 'delete_group') { window.location.href = '/'; return; }
       await refresh();
       if (name === 'generate_plans') window.location.href = `/plan/${encodeURIComponent(token)}/results`;
     } catch (reason) { setActionError(reason instanceof Error ? reason.message : 'Could not complete that action.'); await refresh(); }
@@ -59,6 +61,7 @@ export function OrganizerDashboard({ token, joinToken }: { token: string; joinTo
               <div className="mt-6 flex flex-col gap-3 sm:flex-row">{view.group.status === 'collecting' ? <Button onClick={() => action('lock')} disabled={!canLock || Boolean(busy)} className="h-12 flex-1 rounded-none bg-signal text-white hover:bg-[#c93c25]">{busy === 'lock' ? 'Locking…' : 'Lock the group agreement'} <Lock /></Button> : <><Button onClick={() => action('generate_plans')} disabled={Boolean(busy)} className="h-12 flex-1 rounded-none bg-signal text-white hover:bg-[#c93c25]">{busy === 'generate_plans' ? 'Checking Delhi options…' : view.group.status === 'planned' ? 'Regenerate plans' : 'Generate three plans'} <ArrowRight /></Button><Button variant="outline" onClick={() => action('unlock')} disabled={Boolean(busy)} className="h-12 rounded-none border-foreground"><Unlock />Unlock answers</Button>{view.group.status === 'planned' && <a href={`/plan/${token}/results`} className="inline-flex h-12 items-center justify-center border border-foreground px-5 font-semibold">View plans</a>}</>}</div>
             </> : null}
             {actionError && <p role="alert" className="mt-5 border-l-4 border-destructive bg-[#fbe9e7] px-4 py-3 text-sm text-destructive">{actionError}</p>}
+            <button onClick={() => action('delete_group')} disabled={Boolean(busy)} className="mt-8 text-sm text-destructive underline underline-offset-4">Delete this outing and all responses</button>
           </section>
         </div>
       </div>

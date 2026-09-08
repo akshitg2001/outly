@@ -47,6 +47,19 @@ export function ResultsBoard({ token, initialView }: { token: string; initialVie
     finally { setBusy(null); }
   }
 
+  async function deleteResponse() {
+    if (!view || view.role !== 'participant' || !window.confirm('Delete your response permanently? The group will need to agree on its plan again.')) return;
+    const editToken = window.localStorage.getItem(`outly_edit_token_${view.group.id}`) ?? '';
+    setBusy('delete'); setVoteError('');
+    try {
+      const response = await fetch(`/api/groups/${encodeURIComponent(token)}/actions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'delete_participant', editToken }) });
+      const payload = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(payload.error ?? 'Could not delete your response.');
+      window.localStorage.removeItem(`outly_participant_id_${view.group.id}`); window.localStorage.removeItem(`outly_edit_token_${view.group.id}`); window.localStorage.removeItem(`outly_vote_${view.group.id}`);
+      window.location.href = `/plan/${encodeURIComponent(token)}`;
+    } catch (reason) { setVoteError(reason instanceof Error ? reason.message : 'Could not delete your response.'); setBusy(null); }
+  }
+
   if (loading) return <main className="min-h-screen"><SiteHeader /><LoadingPanel label="Opening the plan board…" /></main>;
   if (error || !view) return <main className="min-h-screen"><SiteHeader /><ErrorPanel message={error || 'Plans are unavailable.'} retry={() => groupState.refresh()} /></main>;
   const plans = view.plans ?? [];
@@ -61,6 +74,7 @@ export function ResultsBoard({ token, initialView }: { token: string; initialVie
         {voteError && <p className="mt-5 text-center text-sm text-destructive">{voteError}</p>}
         {plans.length > 0 && view.role === 'participant' && <FeedbackForm token={token} groupId={view.group.id} />}
         <p className="mx-auto mt-10 max-w-2xl text-center text-xs leading-5 text-muted-foreground">Outly does not track clicks on external booking links. Prices, opening hours and availability should be confirmed with the venue before payment.</p>
+        {view.role === 'participant' && <button onClick={deleteResponse} disabled={Boolean(busy)} className="mx-auto mt-5 block text-sm text-destructive underline underline-offset-4">Delete my response</button>}
       </div>
     </main>
   );

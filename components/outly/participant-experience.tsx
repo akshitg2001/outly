@@ -112,6 +112,23 @@ export function ParticipantExperience({ token }: { token: string }) {
     finally { setBusy(false); }
   }
 
+  async function deleteSaved() {
+    if (!view || !window.confirm('Delete your response permanently? The group may need to agree on its plan again.')) return;
+    const editToken = window.localStorage.getItem(`outly_edit_token_${view.group.id}`) ?? '';
+    setBusy(true); setFormError('');
+    try {
+      const response = await fetch(`/api/groups/${encodeURIComponent(token)}/actions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'delete_participant', editToken }) });
+      const payload = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(payload.error ?? 'Could not delete your response.');
+      window.localStorage.removeItem(`outly_participant_id_${view.group.id}`);
+      window.localStorage.removeItem(`outly_edit_token_${view.group.id}`);
+      window.localStorage.removeItem(`outly_vote_${view.group.id}`);
+      setParticipantId(null); setSubmitted(false); setEditing(true); setDisplayName(''); setOrigin({ label: '', placeId: null });
+      await refresh();
+    } catch (reason) { setFormError(reason instanceof Error ? reason.message : 'Could not delete your response.'); }
+    finally { setBusy(false); }
+  }
+
   if (loading) return <main className="min-h-screen"><SiteHeader /><LoadingPanel /></main>;
   if (error || !view) return <main className="min-h-screen"><SiteHeader /><ErrorPanel message={error || 'This private plan link is unavailable.'} retry={() => refresh()} /></main>;
   if (view.group.status === 'planned') return <ResultsBoard token={token} initialView={view} />;
@@ -134,7 +151,7 @@ export function ParticipantExperience({ token }: { token: string }) {
           <section>
             {affected && <div className="mb-6 border-2 border-signal bg-[#f9ded6] p-5"><p className="eyebrow">Your answer can unlock the plan</p><h2 className="mt-2 font-heading text-2xl font-semibold">A small change was proposed</h2><p className="mt-2 text-sm leading-6">{view.pendingRelaxation?.description}</p><Button onClick={approve} disabled={busy} className="mt-4 rounded-none bg-signal text-white hover:bg-[#c93c25]">{busy ? 'Saving…' : 'Accept this change'} <ArrowRight /></Button></div>}
             {submitted && !editing ? (
-              <div className="border-2 border-foreground bg-card p-6 sm:p-9"><CheckCircle2 className="size-10 text-[#27734d]" /><p className="eyebrow mt-6">Response saved</p><h2 className="mt-2 font-heading text-4xl font-semibold tracking-[-0.04em]">You’re in the mix.</h2><p className="mt-3 max-w-lg leading-7 text-muted-foreground">Outly will combine your limits with everyone else’s. This page updates automatically when the organizer locks the agreement or publishes plans.</p><div className="mt-7 border-y border-border py-4"><p className="text-sm font-semibold">{view.submittedCount} of {view.expectedSize} people have responded</p><p className="mt-1 text-sm text-muted-foreground">You can still edit until the organizer locks the group.</p></div>{view.group.status === 'collecting' ? <button onClick={editSaved} disabled={busy} className="mt-6 border border-foreground px-5 py-3 text-sm font-semibold hover:bg-foreground hover:text-background">Edit my preferences</button> : <div className="mt-6 flex items-center gap-2 text-sm font-semibold"><Lock className="size-4" />Agreement locked — plans are being prepared</div>}{formError && <p className="mt-4 text-sm text-destructive">{formError}</p>}</div>
+              <div className="border-2 border-foreground bg-card p-6 sm:p-9"><CheckCircle2 className="size-10 text-[#27734d]" /><p className="eyebrow mt-6">Response saved</p><h2 className="mt-2 font-heading text-4xl font-semibold tracking-[-0.04em]">You’re in the mix.</h2><p className="mt-3 max-w-lg leading-7 text-muted-foreground">Outly will combine your limits with everyone else’s. This page updates automatically when the organizer locks the agreement or publishes plans.</p><div className="mt-7 border-y border-border py-4"><p className="text-sm font-semibold">{view.submittedCount} of {view.expectedSize} people have responded</p><p className="mt-1 text-sm text-muted-foreground">You can still edit until the organizer locks the group.</p></div>{view.group.status === 'collecting' ? <button onClick={editSaved} disabled={busy} className="mt-6 border border-foreground px-5 py-3 text-sm font-semibold hover:bg-foreground hover:text-background">Edit my preferences</button> : <div className="mt-6 flex items-center gap-2 text-sm font-semibold"><Lock className="size-4" />Agreement locked — plans are being prepared</div>}<button onClick={deleteSaved} disabled={busy} className="ml-5 mt-6 text-sm text-destructive underline underline-offset-4">Delete my response</button>{formError && <p className="mt-4 text-sm text-destructive">{formError}</p>}</div>
             ) : (
               <form onSubmit={(event) => { event.preventDefault(); void submit(); }}>
                 <p className="eyebrow">Your preferences</p><h2 className="mt-2 font-heading text-4xl font-semibold tracking-[-0.04em]">What works for you?</h2><p className="mt-3 text-muted-foreground">There are no wrong answers. The organizer sees the overlap, not your private details.</p>

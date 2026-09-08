@@ -20,6 +20,19 @@ export async function limitRequest(request: Request, scope: string, count: numbe
   await enforceLimit(scope, request.headers.get('CF-Connecting-IP') ?? 'shared-preview', count, seconds);
 }
 
+export async function readJson<T>(request: Request, maxBytes = 16_384): Promise<T> {
+  const announced = Number(request.headers.get('content-length') ?? 0);
+  if (Number.isFinite(announced) && announced > maxBytes) throw new Error('This request is too large. Shorten the submitted text and try again.');
+  const body = await request.text();
+  if (new TextEncoder().encode(body).byteLength > maxBytes) throw new Error('This request is too large. Shorten the submitted text and try again.');
+  try { return JSON.parse(body) as T; }
+  catch { throw new Error('The submitted information could not be read. Refresh and try again.'); }
+}
+
+export async function purgeExpiredRateLimits() {
+  await getDatabase().prepare('DELETE FROM rate_limits WHERE expires_at <= ?').bind(Date.now()).run();
+}
+
 export function apiError(error: unknown) {
   const headers: Record<string, string> = { 'Cache-Control': 'no-store' };
   if (error instanceof RequestLimitError) headers['Retry-After'] = String(error.retryAfter);

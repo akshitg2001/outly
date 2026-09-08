@@ -14,6 +14,10 @@ export function SiteHeader({ backHref, context = 'Delhi NCR pilot' }: { backHref
   );
 }
 
+export function SiteFooter() {
+  return <footer className="border-t-2 border-foreground bg-background"><div className="mx-auto flex max-w-[1280px] flex-col justify-between gap-3 px-5 py-6 text-sm text-muted-foreground sm:flex-row lg:px-8"><p>Outly Delhi NCR pilot</p><nav aria-label="Legal" className="flex gap-5"><a className="underline underline-offset-4 hover:text-foreground" href="/privacy">Privacy</a><a className="underline underline-offset-4 hover:text-foreground" href="/terms">Terms</a></nav></div></footer>;
+}
+
 export function LoadingPanel({ label = 'Loading the group plan…' }: { label?: string }) {
   return <div className="grid min-h-[55vh] place-items-center px-5 text-center"><div><span className="mx-auto block size-8 animate-spin border-2 border-foreground border-t-signal" /><p className="mt-4 font-medium">{label}</p></div></div>;
 }

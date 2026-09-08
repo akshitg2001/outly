@@ -15,7 +15,8 @@ import type {
 import { aggregatePreferences, buildInventoryConflict, roundBudgetHardMax, selectPlans } from '../recommendation';
 import { discoverVenues, pairCandidates, resolveOrigin } from './google';
 import { polishPlanSummaries } from './openai';
-import { getDatabase } from './runtime';
+import { getDatabase, runtimeValue } from './runtime';
+import { purgeExpiredRateLimits } from './request-limits';
 import { hashToken, randomToken } from './security';
 import { normalizeDietary } from '../preferences';
 
@@ -171,11 +172,18 @@ async function event(groupId: string | null, eventName: string, actorHash?: stri
 
 export async function purgeExpiredOrigins() {
   const database = getDatabase();
-  await database.prepare(`UPDATE participants
+  const result = await database.prepare(`UPDATE participants
     SET origin_label = NULL, origin_place_id = NULL, origin_lat = NULL, origin_lng = NULL, updated_at = ?
     WHERE group_id IN (SELECT id FROM groups WHERE expires_at <= ?)
       AND (origin_label IS NOT NULL OR origin_place_id IS NOT NULL OR origin_lat IS NOT NULL OR origin_lng IS NOT NULL)`)
     .bind(Date.now(), Date.now()).run();
+  return Number(result.meta.changes ?? 0);
+}
+
+export async function runPrivacyCleanup() {
+  const originsRemoved = await purgeExpiredOrigins();
+  await purgeExpiredRateLimits();
+  return { originsRemoved, completedAt: Date.now() };
 }
 
 async function groupLookup(token: string) {
@@ -535,6 +543,35 @@ export async function saveFeedback(groupToken: string, privateKey: string, usefu
     .bind(group.id, actorHash, usefulness, reuse ? 1 : 0, Date.now()).run();
 }
 
+export async function deleteParticipant(groupToken: string, privateKey: string) {
+  const { group, role } = await groupLookup(groupToken);
+  if (role !== 'participant' || !privateKey) throw new Error('Open this plan on the device you used to submit your preferences.');
+  const actorHash = await hashToken(privateKey);
+  const participant = await getDatabase().prepare('SELECT id FROM participants WHERE group_id = ? AND edit_token_hash = ?').bind(group.id, actorHash).first<{ id: string }>();
+  if (!participant) throw new Error('Your saved response could not be verified on this device.');
+  const database = getDatabase();
+  await database.batch([
+    database.prepare('DELETE FROM votes WHERE group_id = ? AND voter_key_hash = ?').bind(group.id, actorHash),
+    database.prepare('DELETE FROM feedback WHERE group_id = ? AND actor_hash = ?').bind(group.id, actorHash),
+    database.prepare('DELETE FROM product_events WHERE group_id = ? AND actor_hash = ?').bind(group.id, actorHash),
+    database.prepare('DELETE FROM participants WHERE id = ? AND group_id = ?').bind(participant.id, group.id),
+    database.prepare('DELETE FROM relaxations WHERE group_id = ?').bind(group.id),
+    database.prepare('DELETE FROM plans WHERE group_id = ?').bind(group.id),
+    database.prepare('DELETE FROM plan_runs WHERE group_id = ?').bind(group.id),
+    database.prepare("UPDATE groups SET status = 'collecting', agreement_json = NULL, locked_at = NULL, updated_at = ? WHERE id = ?").bind(Date.now(), group.id),
+  ]);
+}
+
+export async function deleteGroup(groupToken: string) {
+  const { group, role } = await groupLookup(groupToken);
+  if (role !== 'organizer') throw new Error('Only the organizer can delete the entire outing.');
+  const database = getDatabase();
+  await database.batch([
+    database.prepare('DELETE FROM product_events WHERE group_id = ?').bind(group.id),
+    database.prepare('DELETE FROM groups WHERE id = ?').bind(group.id),
+  ]);
+}
+
 export async function voteForPlan(groupToken: string, planId: string, voterKey: string) {
   const { group, actorHash: voterKeyHash } = await verifiedActor(groupToken, voterKey);
   const plan = await getDatabase().prepare('SELECT id FROM plans WHERE id = ? AND group_id = ? LIMIT 1').bind(planId, group.id).first<{ id: string }>();
@@ -586,13 +623,33 @@ function optionalNumber(value: unknown) {
 
 export async function pilotMetrics() {
   const database = getDatabase();
+  const configuredStart = runtimeValue('PILOT_START_AT');
+  const parsedStart = configuredStart ? Date.parse(configuredStart) : 0;
+  const start = Number.isFinite(parsedStart) ? parsedStart : 0;
   const totals = await database.prepare(`SELECT
-    (SELECT COUNT(*) FROM groups) AS groups_created,
-    (SELECT COUNT(*) FROM participants) AS participant_responses,
-    (SELECT COUNT(*) FROM groups WHERE status = 'planned') AS groups_planned,
-    (SELECT COUNT(*) FROM votes) AS votes,
-    (SELECT COUNT(*) FROM relaxations) AS conflicts,
-    (SELECT COUNT(*) FROM relaxations WHERE status = 'accepted') AS conflicts_accepted`).first<Record<string, number>>();
-  const events = await database.prepare('SELECT event_name, COUNT(*) AS count FROM product_events GROUP BY event_name ORDER BY count DESC').all<{ event_name: string; count: number }>();
-  return { totals: totals ?? {}, events: events.results };
+    (SELECT COUNT(*) FROM groups WHERE created_at >= ?) AS groups_created,
+    (SELECT COALESCE(SUM(expected_size), 0) FROM groups WHERE created_at >= ?) AS expected_responses,
+    (SELECT COUNT(*) FROM participants WHERE submitted_at >= ?) AS participant_responses,
+    (SELECT COUNT(*) FROM groups WHERE status = 'planned' AND created_at >= ?) AS groups_planned,
+    (SELECT COUNT(*) FROM groups WHERE locked_at IS NOT NULL AND created_at >= ?) AS groups_locked,
+    (SELECT COUNT(*) FROM votes WHERE created_at >= ?) AS votes,
+    (SELECT COUNT(*) FROM relaxations WHERE created_at >= ?) AS conflicts,
+    (SELECT COUNT(*) FROM relaxations WHERE status = 'accepted' AND updated_at >= ?) AS conflicts_accepted,
+    (SELECT COUNT(*) FROM selections WHERE selected_at >= ?) AS final_selections,
+    (SELECT COUNT(*) FROM feedback WHERE updated_at >= ?) AS feedback_count,
+    (SELECT ROUND(AVG(usefulness), 1) FROM feedback WHERE updated_at >= ?) AS average_usefulness,
+    (SELECT ROUND(AVG(reuse) * 100, 1) FROM feedback WHERE updated_at >= ?) AS reuse_percent,
+    (SELECT ROUND(AVG(locked_at - created_at) / 60000.0, 1) FROM groups WHERE locked_at IS NOT NULL AND created_at >= ?) AS average_minutes_to_lock`)
+    .bind(start, start, start, start, start, start, start, start, start, start, start, start, start).first<Record<string, number | null>>();
+  const values = totals ?? {};
+  const expected = Number(values.expected_responses ?? 0);
+  const locked = Number(values.groups_locked ?? 0);
+  const conflicts = Number(values.conflicts ?? 0);
+  const rates = {
+    inviteCompletionPercent: expected ? Math.round(Number(values.participant_responses ?? 0) / expected * 1000) / 10 : 0,
+    generationSuccessPercent: locked ? Math.round(Number(values.groups_planned ?? 0) / locked * 1000) / 10 : 0,
+    conflictAcceptancePercent: conflicts ? Math.round(Number(values.conflicts_accepted ?? 0) / conflicts * 1000) / 10 : 0,
+  };
+  const events = await database.prepare('SELECT event_name, COUNT(*) AS count FROM product_events WHERE created_at >= ? GROUP BY event_name ORDER BY count DESC').bind(start).all<{ event_name: string; count: number }>();
+  return { pilotStartAt: configuredStart ?? null, totals: values, rates, events: events.results };
 }

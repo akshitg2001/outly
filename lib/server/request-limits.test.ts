@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
-import { enforceLimit, RequestLimitError } from './request-limits';
+import { enforceLimit, readJson, RequestLimitError } from './request-limits';
 
 let sqlite: DatabaseSync;
 const runtime = vi.hoisted(() => ({ database: null as unknown }));
@@ -31,5 +31,10 @@ describe('request limits', () => {
 
     vi.spyOn(Date, 'now').mockReturnValue(1_060_001);
     await expect(enforceLimit('join', 'device-a', 2, 60)).resolves.toBeUndefined();
+  });
+
+  it('rejects oversized and unreadable request bodies', async () => {
+    await expect(readJson(new Request('https://outly.test', { method: 'POST', body: '{bad' }))).rejects.toThrow('could not be read');
+    await expect(readJson(new Request('https://outly.test', { method: 'POST', body: JSON.stringify({ value: '12345' }) }), 4)).rejects.toThrow('too large');
   });
 });

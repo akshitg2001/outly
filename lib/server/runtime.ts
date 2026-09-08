@@ -7,6 +7,8 @@ export type OutlyEnv = {
   OPENAI_MODEL?: string;
   ADMIN_PASSCODE?: string;
   TOKEN_PEPPER?: string;
+  PUBLIC_CONTACT_EMAIL?: string;
+  PILOT_START_AT?: string;
   APP_BASE_URL?: string;
 };
 
