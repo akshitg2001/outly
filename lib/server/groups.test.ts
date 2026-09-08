@@ -210,4 +210,15 @@ describe('database-backed group journey', () => {
     expect(stored).not.toContain('rating');
     expect(stored).not.toContain('openingPeriods');
   });
+
+  it('checks every shared candidate date before deciding which plans survive', async () => {
+    const outing = await group();
+    await submitParticipant(outing.joinToken, answer(0)); await submitParticipant(outing.joinToken, answer(1));
+    await lockGroup(outing.organizerToken);
+    const pairSpy = vi.spyOn(google, 'pairCandidates');
+    await generatePlans(outing.organizerToken);
+    expect(pairSpy).toHaveBeenCalledTimes(2);
+    const checkedDates = pairSpy.mock.calls.map((call) => call[2].selectedDate);
+    expect(checkedDates).toEqual([date(2), date(3)]);
+  });
 });

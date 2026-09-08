@@ -73,7 +73,7 @@ type RelaxationRow = {
 
 type PlanRow = { plan_json: string };
 type StoredLivePlan = {
-  storage: 'live-place-ids-v1'; id: string; rank: number; label: OutingPlan['label'];
+  storage: 'live-place-ids-v1'; id: string; rank: number; label: OutingPlan['label']; date: string;
   activity: { placeId: string; area: string; categories: ActivityCategory[] };
   dining: { placeId: string; area: string; categories: ActivityCategory[] };
 };
@@ -297,7 +297,7 @@ async function latestRelaxation(groupId: string) {
 export function planStoragePayload(plan: OutingPlan, mode: 'live' | 'preview'): OutingPlan | StoredLivePlan {
   if (mode === 'preview') return plan;
   return {
-    storage: 'live-place-ids-v1', id: plan.id, rank: plan.rank, label: plan.label,
+    storage: 'live-place-ids-v1', id: plan.id, rank: plan.rank, label: plan.label, date: plan.date,
     activity: { placeId: plan.stops[0].venue.placeId, area: plan.stops[0].venue.area, categories: plan.stops[0].venue.categories },
     dining: { placeId: plan.stops[1].venue.placeId, area: plan.stops[1].venue.area, categories: plan.stops[1].venue.categories },
   };
@@ -313,8 +313,9 @@ async function rehydrateLivePlans(rows: PlanRow[], participants: ParticipantReco
       { ...stored.dining, kind: 'dining' },
     ]);
     const venues = await venueOverrides(details);
-    const pairs = await pairCandidates(venues, participants, agreement);
-    const refreshed = selectPlans(pairs, participants, agreement)[0];
+    const datedAgreement = { ...agreement, selectedDate: stored.date };
+    const pairs = await pairCandidates(venues, participants, datedAgreement);
+    const refreshed = selectPlans(pairs, participants, datedAgreement)[0];
     if (refreshed) output.push({ ...refreshed, id: stored.id, rank: stored.rank, label: stored.label });
   }
   return output.sort((a, b) => a.rank - b.rank);
@@ -348,6 +349,7 @@ export async function getGroupView(token: string): Promise<PublicGroupView> {
     role,
     selectedPlanId: group.status === 'planned' ? selected?.plan_id ?? null : null,
     planHydrationError,
+    planShortfallMessage: group.status === 'planned' && !planHydrationError && plans.length < 3 ? `Only ${plans.length} distinct ${plans.length === 1 ? 'plan' : 'plans'} met every accepted travel, time, duration, dietary and known-cost constraint. Outly did not add weaker filler.` : null,
     group: { ...group, agreement: computed },
     participantNames: participants.map((participant) => participant.displayName),
     participantSummaries: participants.map((participant) => ({ id: participant.id, displayName: participant.displayName })),
@@ -497,11 +499,19 @@ export async function generatePlans(token: string) {
   const participants = await participantsFor(group.id);
   const discovery = await discoverVenues(participants, group.agreement);
   const venues = await venueOverrides(discovery.venues);
-  const pairs = await pairCandidates(venues, participants, group.agreement);
-  let plans = selectPlans(pairs, participants, group.agreement);
+  const sharedDates = group.agreement.commonDates.length ? group.agreement.commonDates : group.agreement.selectedDate ? [group.agreement.selectedDate] : [];
+  const checkedPairs: Awaited<ReturnType<typeof pairCandidates>> = [];
+  const candidates: OutingPlan[] = [];
+  for (const date of sharedDates) {
+    const datedAgreement = { ...group.agreement, selectedDate: date };
+    const datedPairs = await pairCandidates(venues, participants, datedAgreement);
+    checkedPairs.push(...datedPairs);
+    candidates.push(...selectPlans(datedPairs, participants, datedAgreement));
+  }
+  let plans = chooseDiversePlans(candidates);
 
   if (!plans.length) {
-    const conflict = buildInventoryConflict(participants, group.agreement, pairs);
+    const conflict = buildInventoryConflict(participants, group.agreement, checkedPairs);
     const now = Date.now();
     const database = getDatabase();
     await database.batch([
@@ -534,6 +544,21 @@ export async function generatePlans(token: string) {
   if (!saved[0].meta.changes) throw new Error('The group changed while plans were being checked. Refresh and generate again from the current agreement.');
   await event(group.id, 'plans_generated', null, { count: plans.length, sourceMode: discovery.mode });
   return { plans, dataMode: discovery.mode };
+}
+
+function chooseDiversePlans(candidates: OutingPlan[]) {
+  const chosen: OutingPlan[] = [];
+  const activityKey = (plan: OutingPlan) => plan.stops[0].venue.placeId;
+  const categoryKey = (plan: OutingPlan) => plan.stops[0].venue.categories[0] ?? 'anything';
+  const eligible = (plan: OutingPlan) => !chosen.some((item) => activityKey(item) === activityKey(plan)) && (!chosen.length || chosen.every((item) => item.area !== plan.area || categoryKey(item) !== categoryKey(plan)));
+  const add = (ordered: OutingPlan[], label: OutingPlan['label']) => {
+    const plan = ordered.find(eligible);
+    if (plan) chosen.push({ ...plan, rank: chosen.length + 1, label });
+  };
+  add([...candidates].sort((a, b) => b.score - a.score), 'Best overall fit');
+  add([...candidates].sort((a, b) => Math.max(...a.travel.map((item) => item.minutes)) - Math.max(...b.travel.map((item) => item.minutes))), 'Easiest commute');
+  add([...candidates].sort((a, b) => Number(a.hasUnknownActivityCost || a.hasUnknownDiningCost) - Number(b.hasUnknownActivityCost || b.hasUnknownDiningCost) || a.knownCost - b.knownCost), 'Best value');
+  return chosen;
 }
 
 async function verifiedActor(groupToken: string, privateKey: string) {

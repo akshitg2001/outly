@@ -197,6 +197,7 @@ export type OutingPlan = {
 export type PublicGroupView = {
   selectedPlanId?: string | null;
   planHydrationError?: string | null;
+  planShortfallMessage?: string | null;
   role: 'participant' | 'organizer';
   group: GroupRecord;
   participantNames: string[];
