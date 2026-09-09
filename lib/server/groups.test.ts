@@ -129,16 +129,17 @@ describe('database-backed group journey', () => {
     expect((await getGroupView(outing.joinToken)).plans).toEqual([]);
   });
 
-  it('applies exactly the proposed duration rather than making the participant flexible', async () => {
+  it('generates plans when everyone can spare an extended window', async () => {
     const outing = await group();
-    await submitParticipant(outing.joinToken, answer(0, { durationBand: 'quick' }));
+    await submitParticipant(outing.joinToken, answer(0, { durationBand: 'extended' }));
     await submitParticipant(outing.joinToken, answer(1, { durationBand: 'extended' }));
-    await createRelaxation(outing.organizerToken);
-    await approveRelaxation(outing.joinToken, token(0));
-    const own = await getOwnPreferences(outing.joinToken, token(0));
-    expect(own.durationBand).toBe('quick');
-    expect(own.durationMaxOverride).toBe(300);
-    expect((await getGroupView(outing.joinToken)).agreement?.durationMax).toBe(300);
+    const agreement = (await getGroupView(outing.joinToken)).agreement;
+    expect(agreement?.conflict).toBeNull();
+    expect(agreement?.durationMin).toBe(90);
+    expect(agreement?.preferredDurationMin).toBe(300);
+    expect(agreement?.durationMax).toBe(420);
+    await lockGroup(outing.organizerToken);
+    expect((await generatePlans(outing.organizerToken)).plans.length).toBeGreaterThan(0);
   });
 
   it('applies an explicitly approved budget ceiling without adding another hidden buffer', async () => {

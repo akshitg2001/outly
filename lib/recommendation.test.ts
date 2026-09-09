@@ -40,11 +40,14 @@ describe('group preference aggregation', () => {
     expect(agreement.conflict?.affectedParticipantIds).toHaveLength(1);
   });
 
-  it('detects incompatible time and duration ranges', () => {
+  it('detects incompatible times while treating duration as maximum availability', () => {
     const timeConflict = aggregatePreferences([participant({ timeWindows: ['morning'] }), participant({ timeWindows: ['late'] })], [dateA]);
     expect(timeConflict.conflict?.kind).toBe('time');
-    const durationConflict = aggregatePreferences([participant({ durationBand: 'quick' }), participant({ durationBand: 'extended' })], [dateA]);
-    expect(durationConflict.conflict?.kind).toBe('duration');
+    const durationAgreement = aggregatePreferences([participant({ durationBand: 'quick' }), participant({ durationBand: 'extended' })], [dateA]);
+    expect(durationAgreement.conflict).toBeNull();
+    expect(durationAgreement.durationMin).toBe(90);
+    expect(durationAgreement.preferredDurationMin).toBe(300);
+    expect(durationAgreement.durationMax).toBe(180);
   });
 });
 
@@ -142,14 +145,27 @@ describe('plan safeguards', () => {
     expect(selectPlans([candidate], people, aggregatePreferences(people, [dateA]))).toHaveLength(0);
   });
 
-  it('checks dietary restrictions and both ends of the duration range', () => {
+  it('checks dietary restrictions and treats a duration band lower bound as a soft preference', () => {
     const people = [participant({ durationBand: 'quick', dietary: ['pure_veg'] }), participant({ durationBand: 'quick' })];
     const candidate = pair('veg', people, 20, 900);
     expect(selectPlans([candidate], people, aggregatePreferences(people, [dateA]))).toHaveLength(0);
     candidate.dining.dietary = ['pure_veg']; candidate.dining.dietaryVerified = true;
     expect(selectPlans([candidate], people, aggregatePreferences(people, [dateA]))).toHaveLength(1);
     const extended = people.map((person) => ({ ...person, durationBand: 'extended' as const, timeWindows: ['afternoon', 'evening', 'late'] as const as unknown as ParticipantRecord['timeWindows'] }));
-    expect(selectPlans([candidate], extended, aggregatePreferences(extended, [dateA]))).toHaveLength(0);
+    expect(selectPlans([candidate], extended, aggregatePreferences(extended, [dateA]))).toHaveLength(1);
+  });
+
+  it('prefers a longer valid plan when a group can spare extended time', () => {
+    const people = [
+      participant({ id: 'a', durationBand: 'extended', timeWindows: ['afternoon', 'evening'] }),
+      participant({ id: 'b', durationBand: 'extended', timeWindows: ['afternoon', 'evening'] }),
+    ];
+    const short = pair('short', people, 10, 900);
+    const long = pair('long', people, 10, 900);
+    long.activity.durationMinutes = 220;
+    const plans = rankViablePlans([short, long], people, aggregatePreferences(people, [dateA]));
+    expect(plans).toHaveLength(2);
+    expect(plans[0].title).toContain('long');
   });
 
   it('does not run past the shared window or use a venue after closing', () => {

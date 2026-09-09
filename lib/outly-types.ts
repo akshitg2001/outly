@@ -106,6 +106,7 @@ export type GroupAgreement = {
   rankedActivities: Array<{ category: Exclude<ActivityCategory, 'anything'>; votes: number }>;
   foodPreference: FoodPreference;
   dietary: string[];
+  preferredDurationMin?: number;
   durationMin: number;
   durationMax: number;
   conflict: ConflictSuggestion | null;

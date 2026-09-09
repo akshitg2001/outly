@@ -58,7 +58,11 @@ export function aggregatePreferences(participants: ParticipantRecord[], candidat
   const commonTimeRanges = participants.length ? sharedTimeRanges(participants) : [];
   const budgetTarget = participants.length ? Math.min(...participants.map((participant) => participant.budgetTarget)) : 0;
   const budgetHardMax = participants.length ? Math.min(...participants.map((participant) => Math.min(participant.budgetHardMax, roundBudgetHardMax(participant.budgetTarget)))) : 0;
-  const durationMin = participants.length ? Math.max(...participants.map((participant) => DURATION_BANDS[participant.durationBand].min)) : 0;
+  const preferredDurationMin = participants.length ? Math.max(...participants.map((participant) => DURATION_BANDS[participant.durationBand].min)) : 0;
+  // Duration bands express how much time someone can spare. Every complete
+  // Outly itinerary still needs at least 90 minutes; the band's lower bound is
+  // a ranking preference rather than a hard feasibility rule.
+  const durationMin = participants.length ? 90 : 0;
   const durationMax = participants.length ? Math.min(...participants.map((participant) => participant.durationMaxOverride ?? DURATION_BANDS[participant.durationBand].max)) : 0;
 
   const votes = specificActivities.map((category) => ({
@@ -133,6 +137,7 @@ export function aggregatePreferences(participants: ParticipantRecord[], candidat
     rankedActivities: votes,
     foodPreference,
     dietary,
+    preferredDurationMin,
     durationMin,
     durationMax,
     conflict,
@@ -240,10 +245,14 @@ function buildPlan(pair: CandidatePair, agreement: GroupAgreement, rank: number,
   const budgetScore = agreement.budgetTarget ? Math.max(0, 100 - knownCost / agreement.budgetHardMax * 50) : 60;
   const venueScore = (qualityScore(pair.activity) + qualityScore(pair.dining)) / 2;
   const convenienceScore = Math.max(0, 100 - pair.betweenMinutes * 3);
-  const score = Math.round(preferenceScore * 0.3 + travelScore * 0.25 + budgetScore * 0.2 + venueScore * 0.15 + convenienceScore * 0.1);
   const window = agreement.selectedTimeWindow ?? 'evening';
   const activityDuration = pair.activity.durationMinutes ?? 90;
   const diningDuration = agreement.foodPreference === 'meal' ? 75 : 50;
+  const totalDuration = activityDuration + pair.betweenMinutes + diningDuration;
+  const preferredDurationMin = agreement.preferredDurationMin ?? agreement.durationMin;
+  const durationPreferenceScore = totalDuration >= preferredDurationMin ? 100 : Math.max(0, 100 - (preferredDurationMin - totalDuration) * 0.5);
+  const itineraryScore = convenienceScore * 0.6 + durationPreferenceScore * 0.4;
+  const score = Math.round(preferenceScore * 0.3 + travelScore * 0.25 + budgetScore * 0.2 + venueScore * 0.15 + itineraryScore * 0.1);
   const diningStart = startMinute + activityDuration + pair.betweenMinutes;
   const endMinute = diningStart + diningDuration;
   const activityAction = actionFor(pair.activity);
