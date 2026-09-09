@@ -141,6 +141,37 @@ describe('database-backed group journey', () => {
     expect((await getGroupView(outing.joinToken)).agreement?.durationMax).toBe(300);
   });
 
+  it('applies an explicitly approved budget ceiling without adding another hidden buffer', async () => {
+    const outing = await group();
+    await submitParticipant(outing.joinToken, answer(0, { budgetTarget: 2000 }));
+    await submitParticipant(outing.joinToken, answer(1, { budgetTarget: 3000 }));
+    const person = await getOwnPreferences(outing.joinToken, token(0));
+    const ceiling = Math.ceil(person.budgetHardMax * 1.15);
+    const now = Date.now();
+    sqlite.prepare(`INSERT INTO relaxations (id, group_id, kind, description, affected_participant_ids, proposed_changes, approvals, status, created_at, updated_at)
+      VALUES (?, ?, 'budget', 'Budget test', ?, ?, '[]', 'pending', ?, ?)`).run('budget-relaxation', outing.groupId, JSON.stringify([person.id]), JSON.stringify({ participantId: person.id, budgetCeiling: ceiling }), now, now);
+
+    expect((await approveRelaxation(outing.joinToken, token(0))).complete).toBe(true);
+    const changed = await getOwnPreferences(outing.joinToken, token(0));
+    expect(changed.budgetTarget).toBe(ceiling);
+    expect(changed.budgetHardMax).toBe(ceiling);
+    expect((await getGroupView(outing.joinToken)).agreement?.budgetHardMax).toBe(ceiling);
+  });
+
+  it('changes the food preference only after every affected participant approves', async () => {
+    const outing = await group();
+    await submitParticipant(outing.joinToken, answer(0, { foodPreference: 'meal' }));
+    await submitParticipant(outing.joinToken, answer(1, { foodPreference: 'snacks' }));
+    const person = await getOwnPreferences(outing.joinToken, token(0));
+    const now = Date.now();
+    sqlite.prepare(`INSERT INTO relaxations (id, group_id, kind, description, affected_participant_ids, proposed_changes, approvals, status, created_at, updated_at)
+      VALUES (?, ?, 'food', 'Food test', ?, ?, '[]', 'pending', ?, ?)`).run('food-relaxation', outing.groupId, JSON.stringify([person.id]), JSON.stringify({ foodPreference: 'snacks' }), now, now);
+
+    expect((await approveRelaxation(outing.joinToken, token(0))).complete).toBe(true);
+    expect((await getOwnPreferences(outing.joinToken, token(0))).foodPreference).toBe('snacks');
+    expect((await getGroupView(outing.joinToken)).agreement?.foodPreference).toBe('snacks');
+  });
+
   it('enforces the ten-person maximum even for submissions made together', async () => {
     const outing = await group();
     const submitted = await Promise.allSettled(Array.from({ length: 11 }, (_, index) => submitParticipant(outing.joinToken, answer(index))));

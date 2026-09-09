@@ -68,6 +68,28 @@ describe('plan safeguards', () => {
     expect(conflict.affectedParticipantIds).toEqual(['a']);
   });
 
+  it('widens only the people needed when venue timing is the blocker', () => {
+    const people = [participant({ id: 'a', durationBand: 'standard' }), participant({ id: 'b', durationBand: 'standard' })];
+    const candidate = pair('timing', people, 20, 900);
+    candidate.activity.durationMinutes = 120;
+    candidate.betweenMinutes = 15;
+    candidate.date = dateA;
+    const conflict = buildInventoryConflict(people, aggregatePreferences(people, [dateA]), [candidate]);
+    expect(conflict.kind).toBe('time');
+    expect(conflict.affectedParticipantIds).toEqual(['a', 'b']);
+    expect(conflict.proposedChanges).toEqual({ timeExtensionMinutes: 30 });
+  });
+
+  it('offers a capped 15% budget change only to the blocking participant', () => {
+    const people = [participant({ id: 'a', durationBand: 'quick' }), participant({ id: 'b', budgetTarget: 3000, budgetHardMax: 3450, durationBand: 'quick' })];
+    const candidate = pair('budget', people, 20, 2500);
+    candidate.date = dateA;
+    const conflict = buildInventoryConflict(people, aggregatePreferences(people, [dateA]), [candidate]);
+    expect(conflict.kind).toBe('budget');
+    expect(conflict.affectedParticipantIds).toEqual(['a']);
+    expect(conflict.proposedChanges).toEqual({ participantId: 'a', budgetCeiling: 2645 });
+  });
+
   it('does not silently spend the five-minute travel tolerance', () => {
     const people = [participant({ travelMaxMinutes: 30, durationBand: 'quick' }), participant({ durationBand: 'quick' })];
     expect(selectPlans([pair('outside', people, 32, 900)], people, aggregatePreferences(people, [dateA]))).toHaveLength(0);

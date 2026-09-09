@@ -284,17 +284,7 @@ function buildPlan(pair: CandidatePair, agreement: GroupAgreement, rank: number,
 
 export function selectPlans(pairs: CandidatePair[], participants: ParticipantRecord[], agreement: GroupAgreement) {
   if (participants.length < 2 || agreement.conflict) return [];
-  const viable = pairs.filter((pair) => {
-    const knownCost = (pair.activity.priceMax ?? 0) + (pair.dining.priceMax ?? 0);
-    const travelFits = participants.every((participant) => {
-      const travel = pair.travel.find((item) => item.participantId === participant.id);
-      return travel && travel.mode === participant.travelMode && Number.isFinite(travel.minutes) && travel.minutes >= 0 && travel.minutes <= participant.travelMaxMinutes;
-    });
-    const dietaryFits = agreement.dietary.every((requirement) => pair.dining.dietaryVerified && pair.dining.dietary.includes(requirement));
-    const linksFit = [pair.activity, pair.dining].every((venue) => /^https?:\/\//.test(actionFor(venue).url));
-    const liveTravelFits = pair.activity.source === 'outly_fallback' || pair.travel.every((travel) => !travel.estimated);
-    return knownCost <= agreement.budgetHardMax && knownCost >= 0 && travelFits && liveTravelFits && dietaryFits && linksFit && schedulePair(pair, agreement) !== null;
-  });
+  const viable = pairs.filter((pair) => pairIsViable(pair, participants, agreement));
 
   const base = viable.map((pair) => buildPlan(pair, agreement, 0, 'Best overall fit', schedulePair(pair, agreement)!));
   const bestOverall = [...base].sort((a, b) => b.score - a.score)[0];
@@ -321,6 +311,38 @@ export function selectPlans(pairs: CandidatePair[], participants: ParticipantRec
   }
 
   return selections;
+}
+
+function pairIsViable(pair: CandidatePair, participants: ParticipantRecord[], agreement: GroupAgreement) {
+  const knownCost = (pair.activity.priceMax ?? 0) + (pair.dining.priceMax ?? 0);
+  const travelFits = participants.every((participant) => {
+    const travel = pair.travel.find((item) => item.participantId === participant.id);
+    return travel && travel.mode === participant.travelMode && Number.isFinite(travel.minutes) && travel.minutes >= 0 && travel.minutes <= participant.travelMaxMinutes;
+  });
+  const dietaryFits = agreement.dietary.every((requirement) => pair.dining.dietaryVerified && pair.dining.dietary.includes(requirement));
+  const linksFit = [pair.activity, pair.dining].every((venue) => /^https?:\/\//.test(actionFor(venue).url));
+  const liveTravelFits = pair.activity.source === 'outly_fallback' || pair.travel.every((travel) => !travel.estimated);
+  return knownCost <= agreement.budgetHardMax && knownCost >= 0 && travelFits && liveTravelFits && dietaryFits && linksFit && schedulePair(pair, agreement) !== null;
+}
+
+function subsetsBySize<T>(items: T[]) {
+  const output: T[][] = [];
+  for (let size = 1; size <= items.length; size++) {
+    for (let mask = 1; mask < 2 ** items.length; mask++) {
+      const subset = items.filter((_, index) => Boolean(mask & (1 << index)));
+      if (subset.length === size) output.push(subset);
+    }
+  }
+  return output;
+}
+
+function hasViablePlanAcrossDates(pairs: CandidatePair[], participants: ParticipantRecord[], agreement: GroupAgreement) {
+  if (agreement.conflict) return false;
+  const dates = agreement.commonDates.length ? agreement.commonDates : agreement.selectedDate ? [agreement.selectedDate] : [];
+  return dates.some((date) => {
+    const datedAgreement = { ...agreement, selectedDate: date };
+    return pairs.some((pair) => (!pair.date || pair.date === date) && pairIsViable(pair, participants, datedAgreement));
+  });
 }
 
 export function withDiningAlternatives(plan: OutingPlan, pairs: CandidatePair[], participants: ParticipantRecord[], agreement: GroupAgreement, limit = 2): OutingPlan {
@@ -367,8 +389,13 @@ export function withDiningAlternatives(plan: OutingPlan, pairs: CandidatePair[],
 }
 
 export function buildInventoryConflict(participants: ParticipantRecord[], agreement: GroupAgreement, pairs: CandidatePair[] = []): ConflictSuggestion {
+  const candidateDates = agreement.commonDates.length ? agreement.commonDates : agreement.selectedDate ? [agreement.selectedDate] : [];
+  const worksAfter = (changed: ParticipantRecord[]) => {
+    const changedAgreement = aggregatePreferences(changed, candidateDates);
+    return hasViablePlanAcrossDates(pairs, changed, changedAgreement);
+  };
   const tightTravel = [...participants].sort((a, b) => a.travelMaxMinutes - b.travelMaxMinutes).find((person) =>
-    person.travelMaxMinutes <= 90 && selectPlans(pairs, participants.map((item) => item.id === person.id ? { ...item, travelMaxMinutes: item.travelMaxMinutes + 5 } : item), agreement).length > 0);
+    person.travelMaxMinutes <= 90 && worksAfter(participants.map((item) => item.id === person.id ? { ...item, travelMaxMinutes: item.travelMaxMinutes + 5 } : item)));
   if (tightTravel) {
     return {
       kind: 'travel',
@@ -376,6 +403,39 @@ export function buildInventoryConflict(participants: ParticipantRecord[], agreem
       description: `Increasing the highlighted participant’s travel limit from ${tightTravel.travelMaxMinutes} to ${tightTravel.travelMaxMinutes + 5} minutes unlocks a pairing from the options just checked.`,
       affectedParticipantIds: [tightTravel.id],
       proposedChanges: { participantId: tightTravel.id, travelMaxMinutes: tightTravel.travelMaxMinutes + 5 },
+    };
+  }
+
+  const timeCandidates = participants.filter((person) => (person.timeExtensionMinutes ?? 0) < 60);
+  for (const minutes of [30, 60]) {
+    const widened = subsetsBySize(timeCandidates).find((people) => {
+      const ids = new Set(people.map((person) => person.id));
+      return worksAfter(participants.map((person) => ids.has(person.id) ? { ...person, timeExtensionMinutes: Math.max(person.timeExtensionMinutes ?? 0, minutes) } : person));
+    });
+    if (widened) {
+      return {
+        kind: 'time',
+        title: 'A slightly wider time window unlocks plans',
+        description: `Allowing the highlighted ${widened.length === 1 ? 'person’s' : 'people’s'} selected time window to start earlier or end later by up to ${minutes} minutes unlocks an option from the venues checked.`,
+        affectedParticipantIds: widened.map((person) => person.id),
+        proposedChanges: { timeExtensionMinutes: minutes },
+      };
+    }
+  }
+
+  const budgetCandidates = [...participants].sort((a, b) => a.budgetHardMax - b.budgetHardMax);
+  const tightBudget = budgetCandidates.find((person) => {
+    const budgetCeiling = Math.ceil(person.budgetHardMax * 1.15);
+    return worksAfter(participants.map((item) => item.id === person.id ? { ...item, budgetTarget: budgetCeiling, budgetHardMax: budgetCeiling } : item));
+  });
+  if (tightBudget) {
+    const budgetCeiling = Math.ceil(tightBudget.budgetHardMax * 1.15);
+    return {
+      kind: 'budget',
+      title: 'A small budget change unlocks plans',
+      description: `Increasing the highlighted participant’s maximum from ₹${tightBudget.budgetHardMax.toLocaleString('en-IN')} to ₹${budgetCeiling.toLocaleString('en-IN')} per person unlocks an option.`,
+      affectedParticipantIds: [tightBudget.id],
+      proposedChanges: { participantId: tightBudget.id, budgetCeiling },
     };
   }
   return {

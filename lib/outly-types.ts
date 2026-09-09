@@ -84,7 +84,7 @@ export type GroupRecord = {
   updatedAt: number;
 };
 
-export type ConflictKind = 'responses' | 'date' | 'time' | 'duration' | 'travel' | 'budget' | 'inventory';
+export type ConflictKind = 'responses' | 'date' | 'time' | 'duration' | 'travel' | 'budget' | 'food' | 'inventory';
 
 export type ConflictSuggestion = {
   kind: ConflictKind;
@@ -159,6 +159,7 @@ export type CandidatePair = {
   dining: Venue;
   travel: TravelEstimate[];
   betweenMinutes: number;
+  date?: string;
 };
 
 export type PlanStop = {

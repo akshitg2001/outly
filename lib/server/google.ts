@@ -333,6 +333,7 @@ export async function pairCandidates(venues: Venue[], participants: ParticipantR
 
   return pairs.map((pair) => ({
     ...pair,
+    date: agreement.selectedDate ?? undefined,
     betweenMinutes: liveRoutes ? Math.max(...(betweenLookup.get(`${pair.activity.placeId}:${pair.dining.placeId}`) ?? [Infinity])) : Math.max(5, ...participants.map((person) => previewMinutes(pair.activity, pair.dining, person.travelMode))),
     travel: participants.map((participant) => ({
       participantId: participant.id,

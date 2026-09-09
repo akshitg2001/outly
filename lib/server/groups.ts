@@ -407,21 +407,24 @@ export async function approveRelaxation(groupToken: string, editToken: string) {
   if (!affected.includes(participant.id)) throw new Error('This change does not require your approval.');
   const proposed = json<Record<string, unknown>>(relaxation.proposed_changes, {});
   let changeSql: string;
-  let changeValue: string | number;
+  let changeBindings: Array<string | number>;
   if (relaxation.kind === 'date' && group.candidateDates.includes(String(proposed.acceptableDate))) {
     changeSql = "acceptable_dates = CASE WHEN EXISTS (SELECT 1 FROM json_each(acceptable_dates) WHERE value = ?) THEN acceptable_dates ELSE json_insert(acceptable_dates, '$[#]', ?) END";
-    changeValue = String(proposed.acceptableDate);
+    changeBindings = [String(proposed.acceptableDate), String(proposed.acceptableDate)];
   } else if (relaxation.kind === 'time' && [30, 60].includes(Number(proposed.timeExtensionMinutes))) {
-    changeSql = 'time_extension_minutes = MAX(time_extension_minutes, ?)'; changeValue = Number(proposed.timeExtensionMinutes);
+    changeSql = 'time_extension_minutes = MAX(time_extension_minutes, ?)'; changeBindings = [Number(proposed.timeExtensionMinutes)];
   } else if (relaxation.kind === 'duration' && Number(proposed.durationMax) >= 90 && Number(proposed.durationMax) <= 420) {
-    changeSql = 'duration_max_override = ?'; changeValue = Number(proposed.durationMax);
+    changeSql = 'duration_max_override = ?'; changeBindings = [Number(proposed.durationMax)];
   } else if (relaxation.kind === 'travel' && Number(proposed.travelMaxMinutes) <= 95 && Number(proposed.travelMaxMinutes) >= 20) {
-    changeSql = 'travel_max_minutes = ?'; changeValue = Number(proposed.travelMaxMinutes);
+    changeSql = 'travel_max_minutes = ?'; changeBindings = [Number(proposed.travelMaxMinutes)];
+  } else if (relaxation.kind === 'budget' && Number(proposed.budgetCeiling) >= 345 && Number(proposed.budgetCeiling) <= 26500) {
+    changeSql = 'budget_target = ?, budget_hard_max = ?'; changeBindings = [Number(proposed.budgetCeiling), Number(proposed.budgetCeiling)];
+  } else if (relaxation.kind === 'food' && ['meal', 'snacks'].includes(String(proposed.foodPreference))) {
+    changeSql = 'food_preference = ?'; changeBindings = [String(proposed.foodPreference)];
   } else {
     throw new Error('This suggestion needs updated answers rather than a one-click approval.');
   }
   const now = Date.now();
-  const changeBindings = relaxation.kind === 'date' ? [changeValue, changeValue] : [changeValue];
   // D1 batches are transactions. Append approval and apply the complete proposal
   // together, so concurrent approvals cannot overwrite each other or apply twice.
   await database.batch([
@@ -522,7 +525,34 @@ export async function generatePlans(token: string) {
   ));
 
   if (!plans.length) {
-    const conflict = buildInventoryConflict(participants, group.agreement, checkedPairs);
+    let conflict = buildInventoryConflict(participants, group.agreement, checkedPairs);
+    if (conflict.kind === 'inventory') {
+      const alternateFood: FoodPreference = group.agreement.foodPreference === 'meal' ? 'snacks' : 'meal';
+      const alternateAgreement = { ...group.agreement, foodPreference: alternateFood };
+      try {
+        const alternateDiscovery = await discoverVenues(participants, alternateAgreement);
+        const alternateVenues = await venueOverrides(alternateDiscovery.venues);
+        let alternateWorks = false;
+        for (const date of sharedDates) {
+          const datedAgreement = { ...alternateAgreement, selectedDate: date };
+          const alternatePairs = await pairCandidates(alternateVenues, participants, datedAgreement);
+          if (selectPlans(alternatePairs, participants, datedAgreement).length) { alternateWorks = true; break; }
+        }
+        if (alternateWorks) {
+          const affected = participants.filter((participant) => participant.foodPreference === group.agreement!.foodPreference).map((participant) => participant.id);
+          conflict = {
+            kind: 'food',
+            title: `${alternateFood === 'meal' ? 'A proper meal' : 'Snacks and drinks'} unlocks plans`,
+            description: `Switching the group’s food stop to ${alternateFood === 'meal' ? 'a proper meal' : 'snacks and drinks'} unlocks an option from the venues checked. Only the highlighted people need to accept this preference change.`,
+            affectedParticipantIds: affected,
+            proposedChanges: { foodPreference: alternateFood },
+          };
+        }
+      } catch {
+        // The original provider call succeeded. Keep the honest inventory result
+        // if the optional second-choice search cannot be completed.
+      }
+    }
     const now = Date.now();
     const database = getDatabase();
     await database.batch([
