@@ -139,6 +139,12 @@ describe('database-backed group journey', () => {
     expect(agreement?.preferredDurationMin).toBe(300);
     expect(agreement?.durationMax).toBe(420);
     await lockGroup(outing.organizerToken);
+    const stored = sqlite.prepare('SELECT agreement_json FROM groups WHERE id = ?').get(outing.groupId) as { agreement_json: string };
+    const legacyAgreement = JSON.parse(stored.agreement_json) as Record<string, unknown>;
+    delete legacyAgreement.preferredDurationMin;
+    legacyAgreement.durationMin = 300;
+    sqlite.prepare('UPDATE groups SET agreement_json = ? WHERE id = ?').run(JSON.stringify(legacyAgreement), outing.groupId);
+    expect((await getGroupView(outing.organizerToken)).agreement?.durationMin).toBe(90);
     expect((await generatePlans(outing.organizerToken)).plans.length).toBeGreaterThan(0);
   });
 

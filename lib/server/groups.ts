@@ -85,6 +85,10 @@ const json = <T>(value: string | null, fallback: T): T => {
 };
 
 function toGroup(row: GroupRow): GroupRecord {
+  const storedAgreement = json<GroupAgreement | null>(row.agreement_json, null);
+  const agreement = storedAgreement && storedAgreement.preferredDurationMin === undefined
+    ? { ...storedAgreement, preferredDurationMin: storedAgreement.durationMin, durationMin: 90 }
+    : storedAgreement;
   return {
     id: row.id,
     name: row.name,
@@ -92,7 +96,7 @@ function toGroup(row: GroupRow): GroupRecord {
     expectedSize: row.expected_size,
     candidateDates: json<string[]>(row.candidate_dates, []),
     status: row.status,
-    agreement: json<GroupAgreement | null>(row.agreement_json, null),
+    agreement,
     lockedAt: row.locked_at,
     expiresAt: row.expires_at,
     createdAt: row.created_at,
