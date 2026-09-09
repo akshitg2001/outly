@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { autocompleteOrigins, discoverVenues, hydrateVenueDetails, pairCandidates, resolveOrigin } from './google';
+import { autocompleteOrigins, discoverVenues, hydrateVenueDetails, pairCandidates, PILOT_AREAS, resolveOrigin } from './google';
 import { aggregatePreferences } from '../recommendation';
 import type { ParticipantRecord, Venue } from '../outly-types';
 
@@ -17,6 +17,49 @@ const venue: Venue = { id: 'v', placeId: 'v', kind: 'activity', name: 'Test venu
   categories: ['games'], dietary: [], openingPeriods: [], imageUrl: null, websiteUrl: null, googleMapsUrl: 'https://maps.google.com', bookingUrl: null, source: 'google_places', dietaryVerified: false };
 
 describe('live data failures', () => {
+  it('includes the expanded Delhi NCR planning areas', () => {
+    expect(PILOT_AREAS.map((area) => area.name)).toEqual(expect.arrayContaining([
+      'Khan Market', 'Aerocity', 'Greater Kailash', 'Vasant Kunj', 'Defence Colony', 'Nehru Place',
+      'Gurugram Sector 29', 'Golf Course Road, Gurugram', 'Noida Sector 62', 'Noida Sector 104',
+    ]));
+  });
+
+  it('uses every participant origin to rank areas and searches every category when all are open', async () => {
+    const requests: Array<{ url: string; body: Record<string, any> }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input); const body = JSON.parse(String(init?.body ?? '{}'));
+      requests.push({ url, body });
+      return Response.json(url.includes('routes.googleapis.com') ? [] : { places: [] });
+    }));
+    const people = [{ ...person, activities: ['anything'] as ParticipantRecord['activities'] }, { ...person, id: 'b', activities: ['anything'] as ParticipantRecord['activities'] }];
+    await discoverVenues(people, aggregatePreferences(people, person.acceptableDates));
+    const areaRequest = requests.find((request) => request.url.includes('routes.googleapis.com'));
+    expect(areaRequest?.body.origins).toHaveLength(2);
+    expect(areaRequest?.body.destinations).toHaveLength(PILOT_AREAS.length);
+    const queries = requests.filter((request) => request.body.textQuery).map((request) => request.body.textQuery).join(' | ');
+    expect(queries).toContain('bowling escape room');
+    expect(queries).toContain('sports activity');
+    expect(queries).toContain('art museum');
+    expect(queries).toContain('live music club');
+    expect(requests.filter((request) => request.body.maxResultCount === 10)).toHaveLength(10);
+  });
+
+  it('removes weakly reviewed restaurants from the expanded discovery pool', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input); const body = JSON.parse(String(init?.body ?? '{}'));
+      if (url.includes('routes.googleapis.com')) return Response.json([]);
+      if (!String(body.textQuery ?? '').match(/restaurant|cafe|snacks|rooftop/)) return Response.json({ places: [] });
+      const base = { formattedAddress: 'Delhi', location: { latitude: 28.6, longitude: 77.2 }, regularOpeningHours: { periods: [] } };
+      return Response.json({ places: [
+        { ...base, id: 'strong', displayName: { text: 'Strong choice' }, rating: 4.5, userRatingCount: 1200 },
+        { ...base, id: 'weak', displayName: { text: 'Weak choice' }, rating: 3.5, userRatingCount: 20 },
+      ] });
+    }));
+    const result = await discoverVenues([person, { ...person, id: 'b' }], agreement);
+    expect(result.venues.map((item) => item.placeId)).toContain('strong');
+    expect(result.venues.map((item) => item.placeId)).not.toContain('weak');
+  });
+
   it('keeps the live autocomplete bias within Google’s 50 km limit', async () => {
     let requestBody = '';
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
