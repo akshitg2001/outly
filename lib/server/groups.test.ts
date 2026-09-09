@@ -69,7 +69,7 @@ describe('database-backed group journey', () => {
     await expect(submitParticipant(outing.joinToken, answer(0))).rejects.toThrow('locked');
     const generated = await generatePlans(outing.organizerToken);
     expect(generated.plans.length).toBeGreaterThan(0);
-    expect(generated.plans.length).toBeLessThanOrEqual(3);
+    expect(generated.plans.length).toBeLessThanOrEqual(5);
     expect(generated.dataMode).toBe('preview');
     await voteForPlan(outing.joinToken, generated.plans[0].id, token(0));
     await voteForPlan(outing.joinToken, generated.plans[0].id, token(0));
@@ -248,8 +248,11 @@ describe('database-backed group journey', () => {
     await lockGroup(outing.organizerToken);
     const pairSpy = vi.spyOn(google, 'pairCandidates');
     await generatePlans(outing.organizerToken);
-    expect(pairSpy).toHaveBeenCalledTimes(2);
-    const checkedDates = pairSpy.mock.calls.map((call) => call[2].selectedDate);
-    expect(checkedDates).toEqual([date(2), date(3)]);
+    expect(pairSpy).toHaveBeenCalledTimes(6);
+    const checkedSlots = pairSpy.mock.calls.map((call) => [call[2].selectedDate, call[2].selectedTimeWindow]);
+    expect(checkedSlots).toEqual([
+      [date(2), 'afternoon'], [date(2), 'evening'], [date(2), 'late'],
+      [date(3), 'afternoon'], [date(3), 'evening'], [date(3), 'late'],
+    ]);
   });
 });

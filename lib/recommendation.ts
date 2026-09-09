@@ -14,6 +14,7 @@ import {
 } from './outly-types';
 
 const specificActivities = ACTIVITY_CATEGORIES.filter((category): category is Exclude<ActivityCategory, 'anything'> => category !== 'anything');
+export const MAX_BETWEEN_STOP_MINUTES = 20;
 
 function intersection<T>(lists: T[][]): T[] {
   if (lists.length === 0) return [];
@@ -215,8 +216,11 @@ function schedulePair(pair: CandidatePair, agreement: GroupAgreement): number | 
   const duration = activityDuration + pair.betweenMinutes + diningDuration;
   if (duration < agreement.durationMin || duration > agreement.durationMax) return null;
   const ranges = agreement.commonTimeRanges ?? [TIME_WINDOWS[agreement.selectedTimeWindow]];
+  const preferredStart = TIME_WINDOWS[agreement.selectedTimeWindow];
   for (const range of ranges) {
-    for (let start = range.start; start + duration <= range.end; start += 15) {
+    const firstStart = Math.max(range.start, preferredStart.start);
+    const lastStart = Math.min(range.end - duration, preferredStart.end - 15);
+    for (let start = firstStart; start <= lastStart; start += 15) {
       const diningStart = start + activityDuration + pair.betweenMinutes;
       if (venueOpenFor(pair.activity, agreement.selectedDate, start, start + activityDuration) && venueOpenFor(pair.dining, agreement.selectedDate, diningStart, start + duration)) return start;
     }
@@ -262,6 +266,7 @@ function buildPlan(pair: CandidatePair, agreement: GroupAgreement, rank: number,
     participantCount: agreement.participantCount,
     area: pair.activity.area,
     date: agreement.selectedDate ?? '',
+    timeWindow: window,
     startTime: minutesToTime(startMinute),
     endTime: minutesToTime(endMinute),
     knownCost,
@@ -294,11 +299,16 @@ function buildPlan(pair: CandidatePair, agreement: GroupAgreement, rank: number,
   };
 }
 
-export function selectPlans(pairs: CandidatePair[], participants: ParticipantRecord[], agreement: GroupAgreement) {
+export function rankViablePlans(pairs: CandidatePair[], participants: ParticipantRecord[], agreement: GroupAgreement) {
   if (participants.length < 2 || agreement.conflict) return [];
   const viable = pairs.filter((pair) => pairIsViable(pair, participants, agreement));
+  return viable
+    .map((pair) => buildPlan(pair, agreement, 0, 'Best overall fit', schedulePair(pair, agreement)!))
+    .sort((a, b) => b.score - a.score);
+}
 
-  const base = viable.map((pair) => buildPlan(pair, agreement, 0, 'Best overall fit', schedulePair(pair, agreement)!));
+export function selectPlans(pairs: CandidatePair[], participants: ParticipantRecord[], agreement: GroupAgreement, limit = 3) {
+  const base = rankViablePlans(pairs, participants, agreement);
   const bestOverall = [...base].sort((a, b) => b.score - a.score)[0];
   const selections: OutingPlan[] = [];
 
@@ -317,12 +327,12 @@ export function selectPlans(pairs: CandidatePair[], participants: ParticipantRec
   add(bestValue, 'Best value');
 
   for (const plan of [...base].sort((a, b) => b.score - a.score)) {
-    if (selections.length >= 3) break;
+    if (selections.length >= limit) break;
     const label: OutingPlan['label'] = selections.length === 1 ? 'Easiest commute' : selections.length === 2 ? 'Best value' : 'Best overall fit';
     add(plan, label);
   }
 
-  return selections;
+  return selections.slice(0, limit);
 }
 
 function pairIsViable(pair: CandidatePair, participants: ParticipantRecord[], agreement: GroupAgreement) {
@@ -334,7 +344,18 @@ function pairIsViable(pair: CandidatePair, participants: ParticipantRecord[], ag
   const dietaryFits = agreement.dietary.every((requirement) => pair.dining.dietaryVerified && pair.dining.dietary.includes(requirement));
   const linksFit = [pair.activity, pair.dining].every((venue) => actionFor(venue).url.startsWith('https://'));
   const liveTravelFits = pair.activity.source === 'outly_fallback' || pair.travel.every((travel) => !travel.estimated);
-  return knownCost <= agreement.budgetHardMax && knownCost >= 0 && travelFits && liveTravelFits && dietaryFits && linksFit && schedulePair(pair, agreement) !== null;
+  const transferFits = Number.isFinite(pair.betweenMinutes) && pair.betweenMinutes >= 0 && pair.betweenMinutes <= MAX_BETWEEN_STOP_MINUTES;
+  return knownCost <= agreement.budgetHardMax && knownCost >= 0 && transferFits && travelFits && liveTravelFits && dietaryFits && linksFit && schedulePair(pair, agreement) !== null;
+}
+
+export function planningTimeWindows(agreement: GroupAgreement): TimeWindow[] {
+  if (agreement.commonTimeWindows.length) return agreement.commonTimeWindows;
+  if (agreement.selectedTimeWindow) return [agreement.selectedTimeWindow];
+  const ranges = agreement.commonTimeRanges ?? [];
+  return (Object.keys(TIME_WINDOWS) as TimeWindow[]).filter((window) => ranges.some((range) => {
+    const definition = TIME_WINDOWS[window];
+    return Math.max(range.start, definition.start) < Math.min(range.end, definition.end);
+  }));
 }
 
 function subsetsBySize<T>(items: T[]) {
@@ -352,8 +373,10 @@ function hasViablePlanAcrossDates(pairs: CandidatePair[], participants: Particip
   if (agreement.conflict) return false;
   const dates = agreement.commonDates.length ? agreement.commonDates : agreement.selectedDate ? [agreement.selectedDate] : [];
   return dates.some((date) => {
-    const datedAgreement = { ...agreement, selectedDate: date };
-    return pairs.some((pair) => (!pair.date || pair.date === date) && pairIsViable(pair, participants, datedAgreement));
+    return planningTimeWindows(agreement).some((timeWindow) => {
+      const datedAgreement = { ...agreement, selectedDate: date, selectedTimeWindow: timeWindow };
+      return pairs.some((pair) => (!pair.date || pair.date === date) && (!pair.timeWindow || pair.timeWindow === timeWindow) && pairIsViable(pair, participants, datedAgreement));
+    });
   });
 }
 

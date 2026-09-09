@@ -12,7 +12,7 @@ import type {
   TravelMode,
   Venue,
 } from '../outly-types';
-import { aggregatePreferences, buildInventoryConflict, roundBudgetHardMax, selectPlans, withDiningAlternatives } from '../recommendation';
+import { aggregatePreferences, buildInventoryConflict, planningTimeWindows, rankViablePlans, roundBudgetHardMax, selectPlans, withDiningAlternatives } from '../recommendation';
 import { discoverVenues, hydrateVenueDetails, pairCandidates, resolveOrigin } from './google';
 import { polishPlanSummaries } from './openai';
 import { getDatabase, runtimeValue } from './runtime';
@@ -73,7 +73,8 @@ type RelaxationRow = {
 
 type PlanRow = { plan_json: string };
 type StoredLivePlan = {
-  storage: 'live-place-ids-v1' | 'live-place-ids-v2'; id: string; rank: number; label: OutingPlan['label']; date: string;
+  storage: 'live-place-ids-v1' | 'live-place-ids-v2' | 'live-place-ids-v3'; id: string; rank: number; label: OutingPlan['label']; date: string;
+  timeWindow?: TimeWindow;
   activity: { placeId: string; area: string; categories: ActivityCategory[] };
   dining: { placeId: string; area: string; categories: ActivityCategory[] };
   diningAlternatives?: Array<{ placeId: string; area: string; categories: ActivityCategory[] }>;
@@ -298,7 +299,7 @@ async function latestRelaxation(groupId: string) {
 export function planStoragePayload(plan: OutingPlan, mode: 'live' | 'preview'): OutingPlan | StoredLivePlan {
   if (mode === 'preview') return plan;
   return {
-    storage: 'live-place-ids-v2', id: plan.id, rank: plan.rank, label: plan.label, date: plan.date,
+    storage: 'live-place-ids-v3', id: plan.id, rank: plan.rank, label: plan.label, date: plan.date, timeWindow: plan.timeWindow,
     activity: { placeId: plan.stops[0].venue.placeId, area: plan.stops[0].venue.area, categories: plan.stops[0].venue.categories },
     dining: { placeId: plan.stops[1].venue.placeId, area: plan.stops[1].venue.area, categories: plan.stops[1].venue.categories },
     diningAlternatives: (plan.diningAlternatives ?? []).map((option) => ({ placeId: option.venue.placeId, area: option.venue.area, categories: option.venue.categories })),
@@ -309,14 +310,14 @@ async function rehydrateLivePlans(rows: PlanRow[], participants: ParticipantReco
   const output: OutingPlan[] = [];
   for (const row of rows) {
     const stored = json<StoredLivePlan | null>(row.plan_json, null);
-    if (!stored || !['live-place-ids-v1', 'live-place-ids-v2'].includes(stored.storage)) continue;
+    if (!stored || !['live-place-ids-v1', 'live-place-ids-v2', 'live-place-ids-v3'].includes(stored.storage)) continue;
     const details = await hydrateVenueDetails([
       { ...stored.activity, kind: 'activity' },
       { ...stored.dining, kind: 'dining' },
       ...(stored.diningAlternatives ?? []).map((item) => ({ ...item, kind: 'dining' as const })),
     ]);
     const venues = await venueOverrides(details);
-    const datedAgreement = { ...agreement, selectedDate: stored.date };
+    const datedAgreement = { ...agreement, selectedDate: stored.date, selectedTimeWindow: stored.timeWindow ?? agreement.selectedTimeWindow };
     const pairs = await pairCandidates(venues, participants, datedAgreement);
     const primary = pairs.find((pair) => pair.activity.placeId === stored.activity.placeId && pair.dining.placeId === stored.dining.placeId);
     const refreshed = primary ? selectPlans([primary], participants, datedAgreement)[0] : undefined;
@@ -335,7 +336,7 @@ export async function getGroupView(token: string): Promise<PublicGroupView> {
     computed = { ...computed, conflict: { kind: relaxation.kind as NonNullable<GroupAgreement['conflict']>['kind'], title: 'The group needs an adjustment', description: relaxation.description,
       affectedParticipantIds: json<string[]>(relaxation.affected_participant_ids, []), proposedChanges: json<Record<string, unknown>>(relaxation.proposed_changes, {}) } };
   }
-  const planRows = await getDatabase().prepare('SELECT plan_json FROM plans WHERE group_id = ? ORDER BY created_at DESC, rank ASC LIMIT 3').bind(group.id).all<PlanRow>();
+  const planRows = await getDatabase().prepare('SELECT plan_json FROM plans WHERE group_id = ? ORDER BY created_at DESC, rank ASC LIMIT 5').bind(group.id).all<PlanRow>();
   const voteRows = await getDatabase().prepare('SELECT plan_id, COUNT(*) AS count FROM votes WHERE group_id = ? GROUP BY plan_id').bind(group.id).all<{ plan_id: string; count: number }>();
   const votes = Object.fromEntries(voteRows.results.map((row) => [row.plan_id, Number(row.count)]));
   const latestRun = await getDatabase().prepare('SELECT source_mode FROM plan_runs WHERE group_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1').bind(group.id).first<{ source_mode: 'live' | 'preview' }>();
@@ -353,7 +354,7 @@ export async function getGroupView(token: string): Promise<PublicGroupView> {
     role,
     selectedPlanId: group.status === 'planned' ? selected?.plan_id ?? null : null,
     planHydrationError,
-    planShortfallMessage: group.status === 'planned' && !planHydrationError && plans.length < 3 ? `Only ${plans.length} distinct ${plans.length === 1 ? 'plan' : 'plans'} met every accepted travel, time, duration, dietary and known-cost constraint. Outly did not add weaker filler.` : null,
+    planShortfallMessage: group.status === 'planned' && !planHydrationError && plans.length < 5 ? `Only ${plans.length} distinct ${plans.length === 1 ? 'plan' : 'plans'} met every accepted travel, time, duration, dietary, transfer and known-cost constraint. Outly did not add weaker filler.` : null,
     group: { ...group, agreement: computed },
     participantNames: participants.map((participant) => participant.displayName),
     participantSummaries: participants.map((participant) => ({ id: participant.id, displayName: participant.displayName })),
@@ -508,20 +509,22 @@ export async function generatePlans(token: string) {
   const venues = await venueOverrides(discovery.venues);
   const sharedDates = group.agreement.commonDates.length ? group.agreement.commonDates : group.agreement.selectedDate ? [group.agreement.selectedDate] : [];
   const checkedPairs: Awaited<ReturnType<typeof pairCandidates>> = [];
-  const pairsByDate = new Map<string, Awaited<ReturnType<typeof pairCandidates>>>();
+  const pairsBySlot = new Map<string, Awaited<ReturnType<typeof pairCandidates>>>();
   const candidates: OutingPlan[] = [];
   for (const date of sharedDates) {
-    const datedAgreement = { ...group.agreement, selectedDate: date };
-    const datedPairs = await pairCandidates(venues, participants, datedAgreement);
-    pairsByDate.set(date, datedPairs);
-    checkedPairs.push(...datedPairs);
-    candidates.push(...selectPlans(datedPairs, participants, datedAgreement));
+    for (const timeWindow of planningTimeWindows(group.agreement)) {
+      const datedAgreement = { ...group.agreement, selectedDate: date, selectedTimeWindow: timeWindow };
+      const datedPairs = await pairCandidates(venues, participants, datedAgreement);
+      pairsBySlot.set(`${date}:${timeWindow}`, datedPairs);
+      checkedPairs.push(...datedPairs);
+      candidates.push(...rankViablePlans(datedPairs, participants, datedAgreement));
+    }
   }
   let plans = chooseDiversePlans(candidates).map((plan) => withDiningAlternatives(
     plan,
-    pairsByDate.get(plan.date) ?? [],
+    pairsBySlot.get(`${plan.date}:${plan.timeWindow}`) ?? [],
     participants,
-    { ...group.agreement!, selectedDate: plan.date },
+    { ...group.agreement!, selectedDate: plan.date, selectedTimeWindow: plan.timeWindow },
   ));
 
   if (!plans.length) {
@@ -534,9 +537,12 @@ export async function generatePlans(token: string) {
         const alternateVenues = await venueOverrides(alternateDiscovery.venues);
         let alternateWorks = false;
         for (const date of sharedDates) {
-          const datedAgreement = { ...alternateAgreement, selectedDate: date };
-          const alternatePairs = await pairCandidates(alternateVenues, participants, datedAgreement);
-          if (selectPlans(alternatePairs, participants, datedAgreement).length) { alternateWorks = true; break; }
+          for (const timeWindow of planningTimeWindows(alternateAgreement)) {
+            const datedAgreement = { ...alternateAgreement, selectedDate: date, selectedTimeWindow: timeWindow };
+            const alternatePairs = await pairCandidates(alternateVenues, participants, datedAgreement);
+            if (selectPlans(alternatePairs, participants, datedAgreement).length) { alternateWorks = true; break; }
+          }
+          if (alternateWorks) break;
         }
         if (alternateWorks) {
           const affected = participants.filter((participant) => participant.foodPreference === group.agreement!.foodPreference).map((participant) => participant.id);
@@ -587,19 +593,37 @@ export async function generatePlans(token: string) {
   return { plans, dataMode: discovery.mode };
 }
 
-function chooseDiversePlans(candidates: OutingPlan[]) {
+export function chooseDiversePlans(candidates: OutingPlan[], limit = 5) {
   const chosen: OutingPlan[] = [];
   const activityKey = (plan: OutingPlan) => plan.stops[0].venue.placeId;
+  const diningKey = (plan: OutingPlan) => plan.stops[1].venue.placeId;
   const categoryKey = (plan: OutingPlan) => plan.stops[0].venue.categories[0] ?? 'anything';
-  const eligible = (plan: OutingPlan) => !chosen.some((item) => activityKey(item) === activityKey(plan)) && (!chosen.length || chosen.every((item) => item.area !== plan.area || categoryKey(item) !== categoryKey(plan)));
+  const exactKey = (plan: OutingPlan) => `${plan.date}:${plan.timeWindow}:${activityKey(plan)}:${diningKey(plan)}`;
+  const eligible = (plan: OutingPlan) => !chosen.some((item) => exactKey(item) === exactKey(plan));
   const add = (ordered: OutingPlan[], label: OutingPlan['label']) => {
-    const plan = ordered.find(eligible);
+    const unusedActivity = ordered.find((plan) => eligible(plan) && !chosen.some((item) => activityKey(item) === activityKey(plan)));
+    const plan = unusedActivity ?? ordered.find(eligible);
     if (plan) chosen.push({ ...plan, rank: chosen.length + 1, label });
   };
   add([...candidates].sort((a, b) => b.score - a.score), 'Best overall fit');
   add([...candidates].sort((a, b) => Math.max(...a.travel.map((item) => item.minutes)) - Math.max(...b.travel.map((item) => item.minutes))), 'Easiest commute');
   add([...candidates].sort((a, b) => Number(a.hasUnknownActivityCost || a.hasUnknownDiningCost) - Number(b.hasUnknownActivityCost || b.hasUnknownDiningCost) || a.knownCost - b.knownCost), 'Best value');
-  return chosen;
+  while (chosen.length < limit) {
+    const next = candidates.filter(eligible).sort((a, b) => {
+      const diversity = (plan: OutingPlan) =>
+        (!chosen.some((item) => activityKey(item) === activityKey(plan)) ? 40 : 0)
+        + (!chosen.some((item) => item.timeWindow === plan.timeWindow) ? 25 : 0)
+        + (!chosen.some((item) => item.area === plan.area) ? 15 : 0)
+        + (!chosen.some((item) => categoryKey(item) === categoryKey(plan)) ? 10 : 0)
+        + (!chosen.some((item) => item.date === plan.date) ? 10 : 0)
+        + plan.score / 10;
+      return diversity(b) - diversity(a) || b.score - a.score;
+    })[0];
+    if (!next) break;
+    const label: OutingPlan['label'] = chosen.some((item) => item.timeWindow === next.timeWindow) ? 'Something different' : 'Different time';
+    chosen.push({ ...next, rank: chosen.length + 1, label });
+  }
+  return chosen.slice(0, limit);
 }
 
 async function verifiedActor(groupToken: string, privateKey: string) {

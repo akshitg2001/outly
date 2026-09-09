@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { aggregatePreferences, buildInventoryConflict, inferMealLabel, roundBudgetHardMax, selectPlans, withDiningAlternatives } from './recommendation';
+import { aggregatePreferences, buildInventoryConflict, inferMealLabel, planningTimeWindows, rankViablePlans, roundBudgetHardMax, selectPlans, withDiningAlternatives } from './recommendation';
 import type { CandidatePair, ParticipantRecord, Venue } from './outly-types';
 
 const dateA = '2026-09-19';
@@ -51,6 +51,36 @@ describe('group preference aggregation', () => {
 describe('plan safeguards', () => {
   it('never rounds above the 15% hard ceiling', () => { expect(roundBudgetHardMax(3000)).toBe(3450); expect(roundBudgetHardMax(301)).toBe(346); });
   it('infers meal language from the chosen time', () => { expect(inferMealLabel('evening', 'meal')).toBe('Dinner'); expect(inferMealLabel('morning', 'meal')).toBe('Breakfast'); expect(inferMealLabel('late', 'snacks')).toBe('Late bites & drinks'); });
+
+  it('evaluates every shared time window instead of silently choosing the first', () => {
+    const people = [
+      participant({ timeWindows: ['afternoon', 'evening', 'late'], durationBand: 'quick' }),
+      participant({ timeWindows: ['afternoon', 'evening', 'late'], durationBand: 'quick' }),
+    ];
+    const agreement = aggregatePreferences(people, [dateA]);
+    expect(planningTimeWindows(agreement)).toEqual(['afternoon', 'evening', 'late']);
+    const [latePlan] = selectPlans([pair('late-start', people, 20, 900)], people, { ...agreement, selectedTimeWindow: 'late' });
+    expect(latePlan.startTime).toBe('8:00 PM');
+    expect(latePlan.timeWindow).toBe('late');
+  });
+
+  it('keeps the full viable pool available for a five-plan diversity pass', () => {
+    const people = [participant({ durationBand: 'quick' }), participant({ durationBand: 'quick' })];
+    const candidates = Array.from({ length: 6 }, (_, index) => pair(`option-${index}`, people, 20 + index, 700 + index * 50));
+    expect(rankViablePlans(candidates, people, aggregatePreferences(people, [dateA]))).toHaveLength(6);
+  });
+
+  it('rejects an impractical activity-to-food transfer even when the total duration fits', () => {
+    const people = [
+      participant({ timeWindows: ['afternoon', 'evening'], durationBand: 'standard' }),
+      participant({ timeWindows: ['afternoon', 'evening'], durationBand: 'standard' }),
+    ];
+    const candidate = pair('long-transfer', people, 20, 900);
+    candidate.betweenMinutes = 40;
+    expect(selectPlans([candidate], people, aggregatePreferences(people, [dateA]))).toHaveLength(0);
+    candidate.betweenMinutes = 20;
+    expect(selectPlans([candidate], people, aggregatePreferences(people, [dateA]))).toHaveLength(1);
+  });
 
   it('filters over-budget and over-travel candidates before ranking', () => {
     const people = [participant({ id: 'a', travelMaxMinutes: 35, durationBand: 'quick' }), participant({ id: 'b', travelMaxMinutes: 35, durationBand: 'quick' })];

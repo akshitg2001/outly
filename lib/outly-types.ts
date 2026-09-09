@@ -160,6 +160,7 @@ export type CandidatePair = {
   travel: TravelEstimate[];
   betweenMinutes: number;
   date?: string;
+  timeWindow?: TimeWindow;
 };
 
 export type PlanStop = {
@@ -183,7 +184,7 @@ export type OutingPlan = {
   hoursVerificationRequired?: boolean;
   id: string;
   rank: number;
-  label: 'Best overall fit' | 'Easiest commute' | 'Best value';
+  label: 'Best overall fit' | 'Easiest commute' | 'Best value' | 'Different time' | 'Something different';
   title: string;
   summary: string;
   score: number;
@@ -191,6 +192,7 @@ export type OutingPlan = {
   participantCount: number;
   area: string;
   date: string;
+  timeWindow: TimeWindow;
   startTime: string;
   endTime: string;
   knownCost: number;
