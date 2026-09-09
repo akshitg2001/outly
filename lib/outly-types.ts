@@ -171,6 +171,12 @@ export type PlanStop = {
   actionLabel: string;
 };
 
+export type DiningAlternative = PlanStop & {
+  transferMinutes: number;
+  knownPlanCost: number;
+  hasUnknownCost: boolean;
+};
+
 export type OutingPlan = {
   hasUnknownDiningCost?: boolean;
   hoursVerificationRequired?: boolean;
@@ -191,6 +197,7 @@ export type OutingPlan = {
   dietaryVerificationRequired: boolean;
   travel: TravelEstimate[];
   stops: PlanStop[];
+  diningAlternatives?: DiningAlternative[];
   reasons: string[];
 };
 

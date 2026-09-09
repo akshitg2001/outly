@@ -292,7 +292,7 @@ function departureIso(date: string, agreement: GroupAgreement) {
 export async function pairCandidates(venues: Venue[], participants: ParticipantRecord[], agreement: GroupAgreement): Promise<CandidatePair[]> {
   const activities = venues.filter((venue) => venue.kind === 'activity');
   const dining = venues.filter((venue) => venue.kind === 'dining');
-  const pairs = activities.flatMap((activity) => [...dining].sort((a, b) => haversine(activity, a) - haversine(activity, b)).slice(0, 2).map((restaurant) => ({ activity, dining: restaurant })));
+  const pairs = activities.flatMap((activity) => [...dining].sort((a, b) => haversine(activity, a) - haversine(activity, b)).slice(0, 5).map((restaurant) => ({ activity, dining: restaurant })));
   const uniqueActivities = [...new Map(pairs.map((pair) => [pair.activity.placeId, pair.activity])).values()];
   const date = agreement.selectedDate ?? new Date(Date.now() + 86400000).toISOString().slice(0, 10);
   const departure = departureIso(date, agreement);

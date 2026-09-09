@@ -323,6 +323,49 @@ export function selectPlans(pairs: CandidatePair[], participants: ParticipantRec
   return selections;
 }
 
+export function withDiningAlternatives(plan: OutingPlan, pairs: CandidatePair[], participants: ParticipantRecord[], agreement: GroupAgreement, limit = 2): OutingPlan {
+  const primaryDiningId = plan.stops.find((stop) => stop.kind === 'dining')?.venue.placeId;
+  const activityId = plan.stops.find((stop) => stop.kind === 'activity')?.venue.placeId;
+  if (!primaryDiningId || !activityId || limit < 1) return plan;
+
+  const compatible = pairs
+    .filter((pair) => pair.activity.placeId === activityId && pair.dining.placeId !== primaryDiningId)
+    .flatMap((pair) => {
+      const candidate = selectPlans([pair], participants, agreement)[0];
+      const stop = candidate?.stops.find((item) => item.kind === 'dining');
+      return candidate && stop ? [{ pair, candidate, stop }] : [];
+    });
+
+  const selected: typeof compatible = [];
+  const usedTypes = new Set([plan.stops.find((stop) => stop.kind === 'dining')?.venue.primaryType].filter(Boolean));
+  const usedPrices = new Set([plan.stops.find((stop) => stop.kind === 'dining')?.venue.priceLevel].filter(Boolean));
+  while (selected.length < limit && compatible.length) {
+    compatible.sort((a, b) => {
+      const score = (item: (typeof compatible)[number]) =>
+        (item.stop.venue.primaryType && !usedTypes.has(item.stop.venue.primaryType) ? 1000 : 0)
+        + (item.stop.venue.priceLevel && !usedPrices.has(item.stop.venue.priceLevel) ? 250 : 0)
+        + qualityScore(item.stop.venue)
+        - item.pair.betweenMinutes * 2;
+      return score(b) - score(a);
+    });
+    const next = compatible.shift();
+    if (!next) break;
+    selected.push(next);
+    if (next.stop.venue.primaryType) usedTypes.add(next.stop.venue.primaryType);
+    if (next.stop.venue.priceLevel) usedPrices.add(next.stop.venue.priceLevel);
+  }
+
+  return {
+    ...plan,
+    diningAlternatives: selected.map(({ pair, candidate, stop }) => ({
+      ...stop,
+      transferMinutes: pair.betweenMinutes,
+      knownPlanCost: candidate.knownCost,
+      hasUnknownCost: Boolean(candidate.hasUnknownDiningCost),
+    })),
+  };
+}
+
 export function buildInventoryConflict(participants: ParticipantRecord[], agreement: GroupAgreement, pairs: CandidatePair[] = []): ConflictSuggestion {
   const tightTravel = [...participants].sort((a, b) => a.travelMaxMinutes - b.travelMaxMinutes).find((person) =>
     person.travelMaxMinutes <= 90 && selectPlans(pairs, participants.map((item) => item.id === person.id ? { ...item, travelMaxMinutes: item.travelMaxMinutes + 5 } : item), agreement).length > 0);

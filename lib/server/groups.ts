@@ -12,7 +12,7 @@ import type {
   TravelMode,
   Venue,
 } from '../outly-types';
-import { aggregatePreferences, buildInventoryConflict, roundBudgetHardMax, selectPlans } from '../recommendation';
+import { aggregatePreferences, buildInventoryConflict, roundBudgetHardMax, selectPlans, withDiningAlternatives } from '../recommendation';
 import { discoverVenues, hydrateVenueDetails, pairCandidates, resolveOrigin } from './google';
 import { polishPlanSummaries } from './openai';
 import { getDatabase, runtimeValue } from './runtime';
@@ -73,9 +73,10 @@ type RelaxationRow = {
 
 type PlanRow = { plan_json: string };
 type StoredLivePlan = {
-  storage: 'live-place-ids-v1'; id: string; rank: number; label: OutingPlan['label']; date: string;
+  storage: 'live-place-ids-v1' | 'live-place-ids-v2'; id: string; rank: number; label: OutingPlan['label']; date: string;
   activity: { placeId: string; area: string; categories: ActivityCategory[] };
   dining: { placeId: string; area: string; categories: ActivityCategory[] };
+  diningAlternatives?: Array<{ placeId: string; area: string; categories: ActivityCategory[] }>;
 };
 
 const json = <T>(value: string | null, fallback: T): T => {
@@ -297,9 +298,10 @@ async function latestRelaxation(groupId: string) {
 export function planStoragePayload(plan: OutingPlan, mode: 'live' | 'preview'): OutingPlan | StoredLivePlan {
   if (mode === 'preview') return plan;
   return {
-    storage: 'live-place-ids-v1', id: plan.id, rank: plan.rank, label: plan.label, date: plan.date,
+    storage: 'live-place-ids-v2', id: plan.id, rank: plan.rank, label: plan.label, date: plan.date,
     activity: { placeId: plan.stops[0].venue.placeId, area: plan.stops[0].venue.area, categories: plan.stops[0].venue.categories },
     dining: { placeId: plan.stops[1].venue.placeId, area: plan.stops[1].venue.area, categories: plan.stops[1].venue.categories },
+    diningAlternatives: (plan.diningAlternatives ?? []).map((option) => ({ placeId: option.venue.placeId, area: option.venue.area, categories: option.venue.categories })),
   };
 }
 
@@ -307,16 +309,18 @@ async function rehydrateLivePlans(rows: PlanRow[], participants: ParticipantReco
   const output: OutingPlan[] = [];
   for (const row of rows) {
     const stored = json<StoredLivePlan | null>(row.plan_json, null);
-    if (!stored || stored.storage !== 'live-place-ids-v1') continue;
+    if (!stored || !['live-place-ids-v1', 'live-place-ids-v2'].includes(stored.storage)) continue;
     const details = await hydrateVenueDetails([
       { ...stored.activity, kind: 'activity' },
       { ...stored.dining, kind: 'dining' },
+      ...(stored.diningAlternatives ?? []).map((item) => ({ ...item, kind: 'dining' as const })),
     ]);
     const venues = await venueOverrides(details);
     const datedAgreement = { ...agreement, selectedDate: stored.date };
     const pairs = await pairCandidates(venues, participants, datedAgreement);
-    const refreshed = selectPlans(pairs, participants, datedAgreement)[0];
-    if (refreshed) output.push({ ...refreshed, id: stored.id, rank: stored.rank, label: stored.label });
+    const primary = pairs.find((pair) => pair.activity.placeId === stored.activity.placeId && pair.dining.placeId === stored.dining.placeId);
+    const refreshed = primary ? selectPlans([primary], participants, datedAgreement)[0] : undefined;
+    if (refreshed) output.push(withDiningAlternatives({ ...refreshed, id: stored.id, rank: stored.rank, label: stored.label }, pairs, participants, datedAgreement));
   }
   return output.sort((a, b) => a.rank - b.rank);
 }
@@ -501,14 +505,21 @@ export async function generatePlans(token: string) {
   const venues = await venueOverrides(discovery.venues);
   const sharedDates = group.agreement.commonDates.length ? group.agreement.commonDates : group.agreement.selectedDate ? [group.agreement.selectedDate] : [];
   const checkedPairs: Awaited<ReturnType<typeof pairCandidates>> = [];
+  const pairsByDate = new Map<string, Awaited<ReturnType<typeof pairCandidates>>>();
   const candidates: OutingPlan[] = [];
   for (const date of sharedDates) {
     const datedAgreement = { ...group.agreement, selectedDate: date };
     const datedPairs = await pairCandidates(venues, participants, datedAgreement);
+    pairsByDate.set(date, datedPairs);
     checkedPairs.push(...datedPairs);
     candidates.push(...selectPlans(datedPairs, participants, datedAgreement));
   }
-  let plans = chooseDiversePlans(candidates);
+  let plans = chooseDiversePlans(candidates).map((plan) => withDiningAlternatives(
+    plan,
+    pairsByDate.get(plan.date) ?? [],
+    participants,
+    { ...group.agreement!, selectedDate: plan.date },
+  ));
 
   if (!plans.length) {
     const conflict = buildInventoryConflict(participants, group.agreement, checkedPairs);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { aggregatePreferences, buildInventoryConflict, inferMealLabel, roundBudgetHardMax, selectPlans } from './recommendation';
+import { aggregatePreferences, buildInventoryConflict, inferMealLabel, roundBudgetHardMax, selectPlans, withDiningAlternatives } from './recommendation';
 import type { CandidatePair, ParticipantRecord, Venue } from './outly-types';
 
 const dateA = '2026-09-19';
@@ -101,5 +101,27 @@ describe('plan safeguards', () => {
     expect(plans[0].endTime).toBe('8:53 PM');
     candidate.betweenMinutes = 25;
     expect(selectPlans([candidate], people, aggregatePreferences(people, [dateA]))).toHaveLength(0);
+  });
+
+  it('adds only independently feasible restaurant alternatives to one activity plan', () => {
+    const people = [participant({ id: 'a', durationBand: 'quick' }), participant({ id: 'b', durationBand: 'quick' })];
+    const agreement = aggregatePreferences(people, [dateA]);
+    const primary = pair('primary', people, 20, 1000);
+    primary.dining.primaryType = 'indian_restaurant';
+    const cafe = pair('cafe', people, 20, 700);
+    cafe.activity = primary.activity;
+    cafe.dining.primaryType = 'cafe';
+    const pizza = pair('pizza', people, 20, 900);
+    pizza.activity = primary.activity;
+    pizza.dining.primaryType = 'pizza_restaurant';
+    const overBudget = pair('expensive', people, 20, 3000);
+    overBudget.activity = primary.activity;
+
+    const base = selectPlans([primary], people, agreement)[0];
+    const expanded = withDiningAlternatives(base, [primary, cafe, pizza, overBudget], people, agreement);
+
+    expect(expanded.diningAlternatives).toHaveLength(2);
+    expect(expanded.diningAlternatives?.map((option) => option.venue.placeId)).toEqual(expect.arrayContaining(['dining-cafe', 'dining-pizza']));
+    expect(expanded.diningAlternatives?.some((option) => option.venue.placeId === 'dining-expensive')).toBe(false);
   });
 });
