@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { discoverVenues, hydrateVenueDetails, pairCandidates, resolveOrigin } from './google';
+import { autocompleteOrigins, discoverVenues, hydrateVenueDetails, pairCandidates, resolveOrigin } from './google';
 import { aggregatePreferences } from '../recommendation';
 import type { ParticipantRecord, Venue } from '../outly-types';
 
@@ -17,6 +17,18 @@ const venue: Venue = { id: 'v', placeId: 'v', kind: 'activity', name: 'Test venu
   categories: ['games'], dietary: [], openingPeriods: [], imageUrl: null, websiteUrl: null, googleMapsUrl: 'https://maps.google.com', bookingUrl: null, source: 'google_places', dietaryVerified: false };
 
 describe('live data failures', () => {
+  it('keeps the live autocomplete bias within Google’s 50 km limit', async () => {
+    let requestBody = '';
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      requestBody = String(init?.body ?? '');
+      return Response.json({ suggestions: [] });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    await autocompleteOrigins('Saket Delhi');
+    const request = JSON.parse(requestBody);
+    expect(request.locationBias.circle.radius).toBe(50000);
+  });
+
   it('does not substitute sample venues on a failed Places request', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 503 })));
     await expect(discoverVenues([person], agreement)).rejects.toThrow('temporarily unavailable');

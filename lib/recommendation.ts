@@ -170,9 +170,21 @@ function minutesToTime(minutes: number) {
 }
 
 function actionFor(venue: Venue) {
-  if (venue.bookingUrl) return { url: venue.bookingUrl, label: 'Book with venue' };
-  if (venue.websiteUrl) return { url: venue.websiteUrl, label: 'Open venue site' };
-  return { url: venue.googleMapsUrl, label: 'Open in Google Maps' };
+  const secureUrl = (value: string | null | undefined) => {
+    try {
+      const url = new URL(value ?? '');
+      return url.protocol === 'https:' ? url.toString() : null;
+    } catch {
+      return null;
+    }
+  };
+  const bookingUrl = secureUrl(venue.bookingUrl);
+  if (bookingUrl) return { url: bookingUrl, label: 'Book with venue' };
+  const websiteUrl = secureUrl(venue.websiteUrl);
+  if (websiteUrl) return { url: websiteUrl, label: 'Open venue site' };
+  const mapsUrl = secureUrl(venue.googleMapsUrl)
+    ?? `https://www.google.com/maps/search/?api=1&query_place_id=${encodeURIComponent(venue.placeId)}`;
+  return { url: mapsUrl, label: 'Open in Google Maps' };
 }
 
 function qualityScore(venue: Venue) {
@@ -320,7 +332,7 @@ function pairIsViable(pair: CandidatePair, participants: ParticipantRecord[], ag
     return travel && travel.mode === participant.travelMode && Number.isFinite(travel.minutes) && travel.minutes >= 0 && travel.minutes <= participant.travelMaxMinutes;
   });
   const dietaryFits = agreement.dietary.every((requirement) => pair.dining.dietaryVerified && pair.dining.dietary.includes(requirement));
-  const linksFit = [pair.activity, pair.dining].every((venue) => /^https?:\/\//.test(actionFor(venue).url));
+  const linksFit = [pair.activity, pair.dining].every((venue) => actionFor(venue).url.startsWith('https://'));
   const liveTravelFits = pair.activity.source === 'outly_fallback' || pair.travel.every((travel) => !travel.estimated);
   return knownCost <= agreement.budgetHardMax && knownCost >= 0 && travelFits && liveTravelFits && dietaryFits && linksFit && schedulePair(pair, agreement) !== null;
 }

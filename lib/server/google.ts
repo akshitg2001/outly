@@ -178,7 +178,10 @@ export async function autocompleteOrigins(query: string) {
     body: JSON.stringify({
       input: normalized,
       includedRegionCodes: ['in'],
-      locationBias: { circle: { center: DELHI_CENTER, radius: 90000 } },
+      // Places Autocomplete (New) accepts a maximum circle radius of 50 km.
+      // This is only a ranking bias; resolveOrigin still enforces Outly's
+      // separate 100 km Delhi NCR pilot boundary after a place is selected.
+      locationBias: { circle: { center: DELHI_CENTER, radius: 50000 } },
       languageCode: 'en',
       regionCode: 'IN',
     }),

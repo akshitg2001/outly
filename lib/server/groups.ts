@@ -292,7 +292,7 @@ async function participantsFor(groupId: string) {
 }
 
 async function latestRelaxation(groupId: string) {
-  return await getDatabase().prepare('SELECT * FROM relaxations WHERE group_id = ? ORDER BY created_at DESC LIMIT 1').bind(groupId).first<RelaxationRow>();
+  return await getDatabase().prepare('SELECT * FROM relaxations WHERE group_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1').bind(groupId).first<RelaxationRow>();
 }
 
 export function planStoragePayload(plan: OutingPlan, mode: 'live' | 'preview'): OutingPlan | StoredLivePlan {
@@ -338,7 +338,7 @@ export async function getGroupView(token: string): Promise<PublicGroupView> {
   const planRows = await getDatabase().prepare('SELECT plan_json FROM plans WHERE group_id = ? ORDER BY created_at DESC, rank ASC LIMIT 3').bind(group.id).all<PlanRow>();
   const voteRows = await getDatabase().prepare('SELECT plan_id, COUNT(*) AS count FROM votes WHERE group_id = ? GROUP BY plan_id').bind(group.id).all<{ plan_id: string; count: number }>();
   const votes = Object.fromEntries(voteRows.results.map((row) => [row.plan_id, Number(row.count)]));
-  const latestRun = await getDatabase().prepare('SELECT source_mode FROM plan_runs WHERE group_id = ? ORDER BY created_at DESC LIMIT 1').bind(group.id).first<{ source_mode: 'live' | 'preview' }>();
+  const latestRun = await getDatabase().prepare('SELECT source_mode FROM plan_runs WHERE group_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1').bind(group.id).first<{ source_mode: 'live' | 'preview' }>();
   let planHydrationError: string | null = null;
   let plans: OutingPlan[] = [];
   if (group.status === 'planned') {

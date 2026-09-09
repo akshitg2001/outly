@@ -61,6 +61,16 @@ describe('plan safeguards', () => {
     expect(plans[0].hasUnknownActivityCost).toBe(true);
   });
 
+  it('never sends a user to an insecure venue link', () => {
+    const people = [participant({ id: 'a', durationBand: 'quick' }), participant({ id: 'b', durationBand: 'quick' })];
+    const candidate = pair('secure-link', people, 20, 900);
+    candidate.activity.bookingUrl = 'http://tickets.example.com/book';
+    candidate.activity.websiteUrl = 'http://activity.example.com';
+    const [plan] = selectPlans([candidate], people, aggregatePreferences(people, [dateA]));
+    expect(plan.stops[0].actionUrl).toBe('https://www.google.com/maps');
+    expect(plan.stops.every((stop) => stop.actionUrl.startsWith('https://'))).toBe(true);
+  });
+
   it('proposes a five-minute travel relaxation when inventory cannot fit', () => {
     const people = [participant({ id: 'a', displayName: 'Mira', travelMaxMinutes: 25, durationBand: 'quick' }), participant({ id: 'b', travelMaxMinutes: 45, durationBand: 'quick' })];
     const conflict = buildInventoryConflict(people, aggregatePreferences(people, [dateA]), [pair('near', people, 28, 900)]);
