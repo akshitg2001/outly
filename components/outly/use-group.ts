@@ -3,9 +3,9 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { PublicGroupView } from '@/lib/outly-types';
 
-export function useGroup(token: string, poll = true) {
-  const [view, setView] = useState<PublicGroupView | null>(null);
-  const [loading, setLoading] = useState(true);
+export function useGroup(token: string, poll = true, initialView?: PublicGroupView) {
+  const [view, setView] = useState<PublicGroupView | null>(initialView ?? null);
+  const [loading, setLoading] = useState(!initialView);
   const [error, setError] = useState('');
 
   const refresh = useCallback(async (quiet = false) => {
@@ -19,12 +19,12 @@ export function useGroup(token: string, poll = true) {
     finally { if (!quiet) setLoading(false); }
   }, [token]);
 
-  useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => { if (!initialView) void refresh(); }, [initialView, refresh]);
   useEffect(() => {
-    if (!poll) return;
+    if (!poll || view?.group.status === 'planned') return;
     const timer = window.setInterval(() => void refresh(true), 8000);
     return () => window.clearInterval(timer);
-  }, [poll, refresh]);
+  }, [poll, refresh, view?.group.status]);
 
   return { view, loading, error, refresh };
 }

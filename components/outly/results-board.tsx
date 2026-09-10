@@ -10,11 +10,13 @@ import { ErrorPanel, LoadingPanel, SiteHeader } from './site-header';
 import { useGroup } from './use-group';
 
 export function ResultsBoard({ token, initialView }: { token: string; initialView?: PublicGroupView }) {
-  const groupState = useGroup(token);
-  const view = initialView ?? groupState.view;
-  const loading = initialView ? false : groupState.loading;
-  const error = initialView ? '' : groupState.error;
+  const groupState = useGroup(token, false, initialView);
+  const view = groupState.view;
+  const loading = groupState.loading;
+  const error = groupState.error;
   const [votedPlan, setVotedPlan] = useState<string | null>(null);
+  const [voteAdjustments, setVoteAdjustments] = useState<Record<string, number>>({});
+  const [selectedPlanId, setSelectedPlanId] = useState<string | null>(initialView?.selectedPlanId ?? null);
   const [busy, setBusy] = useState<string | null>(null);
   const [voteError, setVoteError] = useState('');
 
@@ -31,7 +33,13 @@ export function ResultsBoard({ token, initialView }: { token: string; initialVie
       const response = await fetch(`/api/groups/${encodeURIComponent(token)}/actions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'vote', planId: plan.id, voterKey }) });
       const payload = await response.json() as { error?: string };
       if (!response.ok) throw new Error(payload.error ?? 'Could not save your vote.');
-      window.localStorage.setItem(`outly_vote_${view.group.id}`, plan.id); setVotedPlan(plan.id); await groupState.refresh();
+      const previous = votedPlan;
+      window.localStorage.setItem(`outly_vote_${view.group.id}`, plan.id); setVotedPlan(plan.id);
+      if (previous !== plan.id) setVoteAdjustments((current) => ({
+        ...current,
+        ...(previous ? { [previous]: (current[previous] ?? 0) - 1 } : {}),
+        [plan.id]: (current[plan.id] ?? 0) + 1,
+      }));
     } catch (reason) { setVoteError(reason instanceof Error ? reason.message : 'Could not save your vote.'); }
     finally { setBusy(null); }
   }
@@ -42,7 +50,7 @@ export function ResultsBoard({ token, initialView }: { token: string; initialVie
       const response = await fetch(`/api/groups/${encodeURIComponent(token)}/actions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'select_plan', planId: plan.id }) });
       const payload = await response.json() as { error?: string };
       if (!response.ok) throw new Error(payload.error ?? 'Could not choose the plan.');
-      await groupState.refresh();
+      setSelectedPlanId(plan.id);
     } catch (reason) { setVoteError(reason instanceof Error ? reason.message : 'Could not choose the plan.'); }
     finally { setBusy(null); }
   }
@@ -70,7 +78,7 @@ export function ResultsBoard({ token, initialView }: { token: string; initialVie
       <div className="border-b-2 border-foreground bg-foreground text-background"><div className="mx-auto max-w-[1280px] px-5 py-10 lg:px-8"><p className="text-xs font-bold uppercase tracking-[0.18em] text-[#f7a68e]">The group plan board</p><div className="mt-3 flex flex-col justify-between gap-4 sm:flex-row sm:items-end"><div><h1 className="font-heading text-4xl font-semibold tracking-[-0.045em] sm:text-5xl">{plans.length ? `${plans.length} ${plans.length === 1 ? 'way' : 'ways'} to do` : 'Plans for'} {view.group.name}</h1><p className="mt-3 text-[#c9c7bf]">Compare the checked details and any prices still to confirm, then vote for your favourite.</p></div><div className="shrink-0 border border-[#53534f] px-4 py-3 text-sm"><strong className="block text-xl text-white">{view.submittedCount}/{view.expectedSize}</strong>people represented</div></div></div></div>
       <div className="mx-auto max-w-[1280px] px-5 py-8 lg:px-8 lg:py-12">
         {view.dataMode === 'preview' && <div className="mb-7 flex items-start gap-3 border border-[#b26a00] bg-[#fff1cf] p-4 text-sm"><AlertTriangle className="mt-0.5 size-4 shrink-0" /><p><strong>Preview catalogue:</strong> these are example outings, not live recommendations. These plans use a small Delhi reference set and estimated travel; verify details before going.</p></div>}
-        {plans.length === 0 ? <div className="border-2 border-foreground bg-card p-8 text-center"><h2 className="font-heading text-3xl font-semibold">{view.planHydrationError ? 'Live details could not be refreshed.' : 'Plans haven’t been published yet.'}</h2><p className="mt-3 text-muted-foreground">{view.planHydrationError ?? 'The organizer can generate them after locking the group agreement.'}</p>{view.planHydrationError && <Button onClick={() => groupState.refresh()} className="mt-5 rounded-none">Retry live details</Button>}</div> : <div className="space-y-8">{plans.map((plan) => <section key={plan.id}>{view.selectedPlanId === plan.id && <p className="mb-3 border-l-4 border-[#27734d] bg-card p-3 font-semibold text-[#27734d]">The group’s chosen plan</p>}<PlanCard plan={plan} votes={view.votes?.[plan.id] ?? 0} voted={votedPlan === plan.id} busy={busy === plan.id} onVote={() => vote(plan)} />{view.role === 'organizer' && <Button onClick={() => select(plan)} disabled={Boolean(busy) || view.selectedPlanId === plan.id} variant="outline" className="mt-5 h-12 rounded-none border-foreground">{view.selectedPlanId === plan.id ? 'Selected for the group' : 'Choose this for the group'}</Button>}</section>)}</div>}
+        {plans.length === 0 ? <div className="border-2 border-foreground bg-card p-8 text-center"><h2 className="font-heading text-3xl font-semibold">{view.planHydrationError ? 'Live details could not be refreshed.' : 'Plans haven’t been published yet.'}</h2><p className="mt-3 text-muted-foreground">{view.planHydrationError ?? 'The organizer can generate them after locking the group agreement.'}</p>{view.planHydrationError && <Button onClick={() => groupState.refresh()} className="mt-5 rounded-none">Retry live details</Button>}</div> : <div className="space-y-8">{plans.map((plan) => <section key={plan.id}>{selectedPlanId === plan.id && <p className="mb-3 border-l-4 border-[#27734d] bg-card p-3 font-semibold text-[#27734d]">The group’s chosen plan</p>}<PlanCard plan={plan} votes={(view.votes?.[plan.id] ?? 0) + (voteAdjustments[plan.id] ?? 0)} voted={votedPlan === plan.id} busy={busy === plan.id} onVote={() => vote(plan)} />{view.role === 'organizer' && <Button onClick={() => select(plan)} disabled={Boolean(busy) || selectedPlanId === plan.id} variant="outline" className="mt-5 h-12 rounded-none border-foreground">{selectedPlanId === plan.id ? 'Selected for the group' : 'Choose this for the group'}</Button>}</section>)}</div>}
         {view.dataMode === 'live' && <p className="mt-7 text-center text-xs text-muted-foreground">Venue, photo and route information provided by Google Maps</p>}
         {view.planShortfallMessage && <p className="mx-auto mt-6 max-w-2xl border-l-4 border-[#b26a00] bg-[#fff1cf] p-4 text-sm">{view.planShortfallMessage}</p>}
         {voteError && <p className="mt-5 text-center text-sm text-destructive">{voteError}</p>}

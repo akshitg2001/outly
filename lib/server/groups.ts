@@ -311,21 +311,35 @@ export function planStoragePayload(plan: OutingPlan, mode: 'live' | 'preview'): 
 }
 
 async function rehydrateLivePlans(rows: PlanRow[], participants: ParticipantRecord[], agreement: GroupAgreement) {
-  const output: OutingPlan[] = [];
-  for (const row of rows) {
-    const stored = json<StoredLivePlan | null>(row.plan_json, null);
-    if (!stored || !['live-place-ids-v1', 'live-place-ids-v2', 'live-place-ids-v3'].includes(stored.storage)) continue;
-    const details = await hydrateVenueDetails([
-      { ...stored.activity, kind: 'activity' },
-      { ...stored.dining, kind: 'dining' },
+  const storedPlans = rows
+    .map((row) => json<StoredLivePlan | null>(row.plan_json, null))
+    .filter((stored): stored is StoredLivePlan => Boolean(stored && ['live-place-ids-v1', 'live-place-ids-v2', 'live-place-ids-v3'].includes(stored.storage)));
+  const references = new Map<string, { placeId: string; kind: Venue['kind']; area: string; categories: ActivityCategory[] }>();
+  for (const stored of storedPlans) {
+    const items = [
+      { ...stored.activity, kind: 'activity' as const },
+      { ...stored.dining, kind: 'dining' as const },
       ...(stored.diningAlternatives ?? []).map((item) => ({ ...item, kind: 'dining' as const })),
-    ]);
-    const venues = await venueOverrides(details);
-    const datedAgreement = { ...agreement, selectedDate: stored.date, selectedTimeWindow: stored.timeWindow ?? agreement.selectedTimeWindow };
-    const pairs = await pairCandidates(venues, participants, datedAgreement);
-    const primary = pairs.find((pair) => pair.activity.placeId === stored.activity.placeId && pair.dining.placeId === stored.dining.placeId);
-    const refreshed = primary ? selectPlans([primary], participants, datedAgreement)[0] : undefined;
-    if (refreshed) output.push(withDiningAlternatives({ ...refreshed, id: stored.id, rank: stored.rank, label: stored.label }, pairs, participants, datedAgreement));
+    ];
+    for (const item of items) references.set(`${item.kind}:${item.placeId}`, item);
+  }
+  const venues = await venueOverrides(await hydrateVenueDetails([...references.values()]));
+  const plansBySlot = new Map<string, StoredLivePlan[]>();
+  for (const stored of storedPlans) {
+    const key = `${stored.date}:${stored.timeWindow ?? agreement.selectedTimeWindow}`;
+    plansBySlot.set(key, [...(plansBySlot.get(key) ?? []), stored]);
+  }
+  const output: OutingPlan[] = [];
+  for (const storedForSlot of plansBySlot.values()) {
+    const first = storedForSlot[0];
+    const datedAgreement = { ...agreement, selectedDate: first.date, selectedTimeWindow: first.timeWindow ?? agreement.selectedTimeWindow };
+    const relevant = new Set(storedForSlot.flatMap((stored) => [stored.activity.placeId, stored.dining.placeId, ...(stored.diningAlternatives ?? []).map((item) => item.placeId)]));
+    const pairs = await pairCandidates(venues.filter((venue) => relevant.has(venue.placeId)), participants, datedAgreement);
+    for (const stored of storedForSlot) {
+      const primary = pairs.find((pair) => pair.activity.placeId === stored.activity.placeId && pair.dining.placeId === stored.dining.placeId);
+      const refreshed = primary ? selectPlans([primary], participants, datedAgreement)[0] : undefined;
+      if (refreshed) output.push(withDiningAlternatives({ ...refreshed, id: stored.id, rank: stored.rank, label: stored.label }, pairs, participants, datedAgreement));
+    }
   }
   return output.sort((a, b) => a.rank - b.rank);
 }
@@ -349,7 +363,10 @@ export async function getGroupView(token: string): Promise<PublicGroupView> {
   if (group.status === 'planned') {
     if (latestRun?.source_mode === 'live' && computed) {
       try { plans = await rehydrateLivePlans(planRows.results, participants, computed); }
-      catch { planHydrationError = 'Live venue or travel details could not be refreshed. No stored sample data was substituted; retry shortly.'; }
+      catch (error) {
+        console.error('Live plan hydration failed:', error instanceof Error ? error.message : 'Unknown provider failure');
+        planHydrationError = 'Live venue or travel details could not be refreshed. No stored sample data was substituted; retry shortly.';
+      }
     } else plans = planRows.results.map((row) => json<OutingPlan>(row.plan_json, {} as OutingPlan)).filter((plan) => plan.id);
   }
   const selected = await getDatabase().prepare('SELECT plan_id FROM selections WHERE group_id = ?').bind(group.id).first<{ plan_id: string }>();
