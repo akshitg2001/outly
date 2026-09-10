@@ -54,6 +54,13 @@ function answer(index: number, overrides: Partial<ParticipantPreferenceInput> = 
 }
 
 describe('database-backed group journey', () => {
+  it('ships a focused catalogue of verified pilot reservation links', () => {
+    const rows = sqlite.prepare("SELECT place_id, booking_url, source FROM venues WHERE id LIKE 'pilot-link-%'").all() as Array<{ place_id: string; booking_url: string; source: string }>;
+    expect(rows).toHaveLength(15);
+    expect(new Set(rows.map((row) => row.place_id)).size).toBe(15);
+    expect(rows.every((row) => row.source === 'admin' && row.booking_url.startsWith('https://www.zomato.com/'))).toBe(true);
+  });
+
   it('creates, joins, restores private answers, locks, generates, votes and invalidates old plans on unlock', async () => {
     const outing = await group();
     for (let index = 0; index < 4; index++) await submitParticipant(outing.joinToken, answer(index));
